@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Văn phòng Claude</title>
+<link rel="icon" href="assets/tro-ly.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <img src="assets/tro-ly.png" alt="" class="brand-icon">
+    <div>
+      <h1>Văn phòng Claude</h1>
+      <p class="sub" id="sub">Đang mở cửa văn phòng…</p>
+    </div>
+  </div>
+  <div class="tabs" role="tablist">
+    <button data-tab="office" class="on">🏢 Văn phòng</button>
+    <button data-tab="quota">📊 Quota</button>
+  </div>
+  <div class="kpis office-only" id="kpis"></div>
+</header>
+
+<nav class="views office-only" id="views" aria-label="Màn hình đã lưu">
+  <span class="views-label">Màn hình</span>
+  <span class="views-list" id="views-list"></span>
+  <div class="view-menu" id="view-menu" hidden></div>
+</nav>
+
+<nav class="filters office-only" aria-label="Bộ lọc">
+  <input type="search" id="q" placeholder="Tìm tên phiên, dự án, nick…" autocomplete="off">
+  <div class="fgroup" id="f-status"></div>
+  <div class="fgroup" id="apps"></div>
+  <div class="dropdown" id="f-projects">
+    <button class="dd-btn" id="dd-btn" aria-haspopup="true">Dự án: tất cả</button>
+    <div class="menu" id="dd-menu" hidden></div>
+  </div>
+  <select id="f-gio" aria-label="Khoảng thời gian">
+    <option value="1">1 giờ qua</option>
+    <option value="6">6 giờ qua</option>
+    <option value="24">24 giờ qua</option>
+    <option value="72">3 ngày qua</option>
+    <option value="168">7 ngày qua</option>
+    <option value="336">14 ngày qua</option>
+  </select>
+  <select id="f-routine" aria-label="Routine">
+    <option value="all">Mọi phiên</option>
+    <option value="bo">Bỏ routine</option>
+    <option value="chi">Chỉ routine</option>
+  </select>
+  <select id="f-xong" aria-label="Việc đã xong">
+    <option value="ke">Việc xong: xếp lên kệ</option>
+    <option value="an">Việc xong: giấu hẳn</option>
+    <option value="chi">Chỉ xem việc đã xong</option>
+  </select>
+  <label class="toggle"><input type="checkbox" id="f-an"> Hiện mục đã ẩn</label>
+  <button class="reset" id="f-reset">Xoá lọc</button>
+</nav>
+
+<main id="office" class="office office-only" aria-live="polite"></main>
+<main id="quota" class="quota quota-only"></main>
+
+<aside id="drawer" class="drawer" aria-hidden="true">
+  <div class="drawer-inner">
+    <button class="close" id="close" aria-label="Đóng">✕</button>
+    <div id="detail"></div>
+  </div>
+</aside>
+<div id="scrim" class="scrim"></div>
+<div id="toast" class="toast" role="status"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

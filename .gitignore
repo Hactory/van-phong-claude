@@ -1,0 +1,5 @@
+# ảnh gốc trước khi cắt sprite (nặng, không cần để chạy)
+web/assets/raw/
+__pycache__/
+*.pyc
+.DS_Store

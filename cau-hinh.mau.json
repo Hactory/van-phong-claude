@@ -1,0 +1,13 @@
+{
+  "duAn": {
+    "my-app": {"ten": "Ứng dụng chính", "bieu_tuong": "📱"},
+    "website": {"ten": "Trang web", "bieu_tuong": "🌐"}
+  },
+  "banApp": {"Claude-khac": "02"},
+  "moApp": {"02": "~/Applications/Claude-02.app"},
+  "tomTat": {"lenh": ["claude", "-p", "--model", "haiku"], "ten": "claude haiku"},
+  "tienToTraLoi": "[Trả lời qua Văn phòng Claude]",
+  "quyenTraLoi": "default",
+  "mauTeam": {"Công ty A": "tim"},
+  "boQuaLane": []
+}
