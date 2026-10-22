@@ -20,7 +20,9 @@ Cấu hình riêng từng máy nằm ở ~/.claude/van-phong/cau-hinh.json (xem 
 Không cần thư viện ngoài. Chạy: python3 server.py [--port 4747]
 """
 import argparse
+import collections
 import glob
+import hashlib
 import importlib.util
 import json
 import os
@@ -135,13 +137,25 @@ def learn_identity():
             accounts.setdefault(a["accountUuid"], a["emailAddress"])
         if a.get("organizationUuid") and a.get("organizationName"):
             orgs.setdefault(a["organizationUuid"], a["organizationName"])
-    # Phiên app đang mở mang sẵn email + mã tài khoản trong biến môi trường của tiến trình.
-    for rec in live_records().values():
-        try:
-            out = subprocess.run(["ps", "eww", "-o", "command=", "-p", str(rec["pid"])],
-                                 capture_output=True, text=True, timeout=3).stdout
-        except Exception:  # noqa: BLE001
-            continue
+    # Phiên app đang mở mang sẵn email + mã tài khoản trong biến môi trường của tiến trình (một lần ps cho mọi phiên).
+    lives = list(live_records().values())
+    envs = {}
+    try:
+        pids = ",".join(sorted({str(rec["pid"]) for rec in lives}))
+        if pids:
+            out = subprocess.run(["ps", "eww", "-o", "pid=,command=", "-p", pids],
+                                 capture_output=True, text=True, timeout=5).stdout
+            want, cur = set(pids.split(",")), None
+            for line in out.splitlines():
+                pid, _, cmd = line.strip().partition(" ")
+                if pid in want and pid not in envs:
+                    cur, envs[pid] = pid, cmd
+                elif cur:                       # biến môi trường có xuống dòng: vẫn thuộc tiến trình trước
+                    envs[cur] += "\n" + line
+    except Exception:  # noqa: BLE001
+        pass
+    for rec in lives:
+        out = envs.get(str(rec["pid"]), "")
         env = dict(re.findall(r"\b(CLAUDE_CODE_(?:USER_EMAIL|ACCOUNT_UUID|ORGANIZATION_UUID|SUBSCRIPTION_TYPE|RATE_LIMIT_TIER))=(\S+)", out))
         if env.get("CLAUDE_CODE_ACCOUNT_UUID") and env.get("CLAUDE_CODE_USER_EMAIL"):
             accounts[env["CLAUDE_CODE_ACCOUNT_UUID"]] = env["CLAUDE_CODE_USER_EMAIL"]
@@ -238,37 +252,183 @@ def live_records():
     return out
 
 
-_registry_cache = {}   # path -> (mtime, bản ghi rút gọn)
 REG_KEYS = ("sessionId", "cliSessionId", "title", "cwd", "originCwd", "createdAt", "lastActivityAt",
             "isArchived", "postTurnSummary", "postTurnSummaryFor", "lastAssistantUuid", "model",
             "scheduledTaskId", "completedTurns", "permissionMode", "effort", "spawnedFrom")
+# Mỗi bản ghi phiên của app nặng trung bình ~250 KB (phần lớn là cấu hình MCP), nghìn phiên là vài trăm MB:
+# chỉ giữ các khoá cần, và lưu bản rút gọn ra đĩa để mở lại app khỏi phải đọc lại từ đầu.
+REG_CACHE_FILE = os.path.join(STATE_DIR, "bo-dem-phien.json")
+REG_CACHE_SAVE_SEC = 300
+_registry_cache = {}   # path -> (inode, bản ghi rút gọn)
+_registry_dirs = {}    # thư mục tổ chức -> (mtime_ns, [path…] theo thứ tự thư mục)
+_registry_disk = {"loaded": False, "dirty": False, "saved": 0.0}
+_registry_lock = threading.Lock()
+_registry_ids = {"oid": {}, "by": {}, "dup": {}}   # file -> mã văn phòng; mã văn phòng -> bản ghi; mã trùng -> [file…]
+
+
+def _reg_load(path):
+    d = load_json(path)
+    if not d:
+        return None
+    parts = path.split(os.sep)
+    rec = {k: d.get(k) for k in REG_KEYS}
+    rec.update(appDir=parts[-5], accountUuid=parts[-3], orgUuid=parts[-2], file=path)
+    return rec
+
+
+def _reg_scan(d):
+    """Đọc lại một thư mục tổ chức. App ghi bản ghi kiểu ghi file tạm rồi đổi tên, nên phiên nào đổi thì inode
+    của file đó đổi (và mtime của thư mục đổi): chỉ file có inode mới mới phải đọc lại.
+    Trả (danh sách path, đọc đủ hết chưa); file đọc lỗi thì lần sau quét lại thư mục."""
+    paths, ok = [], True
+    try:
+        entries = list(os.scandir(d))
+    except OSError:
+        return paths, False
+    for e in entries:
+        if not (e.name.startswith("local_") and e.name.endswith(".json")):
+            continue
+        ino = e.inode()
+        c = _registry_cache.get(e.path)
+        if not c or c[0] != ino:
+            rec = _reg_load(e.path)
+            if rec is None:
+                ok = False
+                continue
+            _registry_cache[e.path] = (ino, rec)
+            _registry_disk["dirty"] = True
+        paths.append(e.path)
+    return paths, ok
+
+
+def _reg_disk_load():
+    _registry_disk["loaded"] = True
+    data = load_json(REG_CACHE_FILE, {}) or {}
+    if data.get("keys") != list(REG_KEYS):
+        return
+    for path, (ino, rec) in (data.get("rows") or {}).items():
+        _registry_cache[path] = (ino, rec)
+
+
+def _reg_disk_save():
+    if not _registry_disk["dirty"] or time.time() - _registry_disk["saved"] < REG_CACHE_SAVE_SEC:
+        return
+    try:
+        save_json(REG_CACHE_FILE, {"keys": list(REG_KEYS), "rows": {p: list(c) for p, c in _registry_cache.items()}})
+    except OSError:
+        return
+    _registry_disk.update(dirty=False, saved=time.time())
+
+
+def _reg_index(rows):
+    """Mã văn phòng của từng bản ghi. Cùng một mã local_… có thể nằm ở nhiều bản app hoặc nhiều tổ chức (chép phiên
+    sang bản khác, đổi tổ chức trong cùng bản), mỗi nơi là một phiên riêng với nhật ký riêng. Mã trùng thì thêm đuôi
+    __<6 ký tự băm thư mục chứa> để mỗi bàn chỉ tới đúng bản ghi của nó; mã không trùng giữ nguyên."""
+    n = collections.Counter(r["sessionId"] for r in rows)
+    oid, by, dup = {}, {}, {}
+    for r in rows:
+        sid = r["sessionId"]
+        if n[sid] > 1:
+            dup.setdefault(sid, []).append(r["file"])
+            sid = f"{sid}__{hashlib.sha1(os.path.dirname(r['file']).encode()).hexdigest()[:6]}"
+        oid[r["file"]] = sid
+        by[sid] = r
+    _registry_ids.update(oid=oid, by=by, dup=dup)
 
 
 def registry():
-    rows = []
-    seen = set()
-    for path in glob.glob(os.path.join(APP_SUPPORT, "Claude*", "claude-code-sessions", "*", "*", "local_*.json")):
-        seen.add(path)
-        try:
-            mt = os.stat(path).st_mtime
-        except OSError:
-            continue
-        c = _registry_cache.get(path)
-        if not c or c[0] != mt:
-            d = load_json(path)
-            if not d:
+    """Mọi bản ghi phiên của các bản app. Thư mục tổ chức nào mtime không đổi thì dùng lại danh sách cũ."""
+    with _registry_lock:
+        if not _registry_disk["loaded"]:
+            _reg_disk_load()
+        rows, seen, changed = [], set(), False
+        dirs = glob.glob(os.path.join(APP_SUPPORT, "Claude*", "claude-code-sessions", "*", "*"))
+        for d in dirs:
+            try:
+                mt = os.stat(d).st_mtime_ns
+            except OSError:
                 continue
-            parts = path.split(os.sep)
-            rec = {k: d.get(k) for k in REG_KEYS}
-            rec.update(appDir=parts[-5], accountUuid=parts[-3], orgUuid=parts[-2], file=path)
-            _registry_cache[path] = c = (mt, rec)
-        rows.append(c[1])
-    for gone in set(_registry_cache) - seen:
-        _registry_cache.pop(gone, None)
-    return rows
+            c = _registry_dirs.get(d)
+            if not c or c[0] != mt:
+                paths, ok = _reg_scan(d)
+                c = _registry_dirs[d] = (mt if ok else None, paths)
+                changed = True
+            seen.update(c[1])
+            rows.extend(_registry_cache[p][1] for p in c[1])
+        for gone in set(_registry_cache) - seen:
+            _registry_cache.pop(gone, None)
+            _registry_disk["dirty"] = changed = True
+        for gone in set(_registry_dirs) - set(dirs):
+            _registry_dirs.pop(gone, None)
+        if changed or len(_registry_ids["oid"]) != len(rows):
+            _reg_index(rows)
+        _reg_disk_save()
+        return rows
+
+
+def office_id(rec):
+    """Mã của bàn trên văn phòng (xem _reg_index): thường chính là mã local_… của app."""
+    return _registry_ids["oid"].get(rec.get("file"), rec["sessionId"])
+
+
+def live_of(rec, live):
+    """Phiên đang mở ứng với bản ghi này. Mã local_… trùng ở nhiều bản app thì phiên đang mở mang mã CLI của
+    bản sao khác không phải của bản ghi này."""
+    sid, cli = rec["sessionId"], rec.get("cliSessionId") or ""
+    if sid not in _registry_ids["dup"]:
+        return live.get(sid) or live.get(cli)
+    lv = live.get(cli) or live.get(sid)
+    if lv and lv.get("sessionId") != cli and any(
+            (_registry_cache.get(f) or (0, {}))[1].get("cliSessionId") == lv.get("sessionId")
+            for f in _registry_ids["dup"][sid]):
+        return None
+    return lv
+
+
+def parent_id(rec):
+    """Mã văn phòng của phiên cha. Phiên cha có mã trùng thì lấy bản nằm cùng thư mục, rồi cùng bản app."""
+    psid = (rec.get("spawnedFrom") or {}).get("sessionId")
+    files = _registry_ids["dup"].get(psid)
+    if not files:
+        return psid
+    here = os.path.dirname(rec.get("file") or "")
+    for f in files:
+        if os.path.dirname(f) == here:
+            return _registry_ids["oid"].get(f, psid)
+    for f in files:
+        if f.split(os.sep)[-5] == rec.get("appDir"):
+            return _registry_ids["oid"].get(f, psid)
+    return psid
 
 
 _transcript_path = {}
+_tindex = {"at": 0.0, "order": [], "dirs": {}}   # dirs: thư mục dự án -> (mtime_ns, tên các file .jsonl)
+
+
+def transcript_index():
+    """Tên nhật ký trong từng thư mục dự án (cả nghìn thư mục). Chỉ liệt kê lại thư mục có mtime đổi (tạo file mới
+    là đổi mtime thư mục), và tối đa mỗi giây một lần, thay cho glob cả nghìn thư mục mỗi lần tìm một phiên."""
+    if time.time() - _tindex["at"] < 1:
+        return _tindex
+    try:
+        order = [e.path for e in os.scandir(PROJECTS_DIR) if not e.name.startswith(".")]
+    except OSError:
+        order = []
+    dirs = {}
+    for d in order:
+        try:
+            mt = os.stat(d).st_mtime_ns
+        except OSError:
+            continue
+        c = _tindex["dirs"].get(d)
+        if not c or c[0] != mt:
+            try:
+                c = (mt, {n for n in os.listdir(d) if n.endswith(".jsonl")})
+            except OSError:
+                c = (mt, set())
+        dirs[d] = c
+    _tindex.update(at=time.time(), order=order, dirs=dirs)
+    return _tindex
 
 
 def transcript_of(cli_id):
@@ -277,7 +437,9 @@ def transcript_of(cli_id):
     p = _transcript_path.get(cli_id)
     if p and os.path.exists(p):
         return p
-    hits = glob.glob(os.path.join(PROJECTS_DIR, "*", cli_id + ".jsonl"))
+    idx, name = transcript_index(), cli_id + ".jsonl"
+    hits = [h for d in idx["order"] if name in idx["dirs"].get(d, (0, ()))[1]
+            if os.path.lexists(h := os.path.join(d, name))]
     p = max(hits, key=os.path.getmtime) if hits else None
     if p:
         _transcript_path[cli_id] = p
@@ -497,19 +659,19 @@ def session_usage(tpath):
     return out
 
 
-_scan_cache = {}   # path -> (mtime, size, kết quả)
+_scan_cache = {}   # (path, số byte đọc) -> (mtime, size, kết quả)
 
 
-def scan_cached(path):
+def scan_cached(path, nbytes=120_000):
     if not path:
         return scan_transcript(None)
     try:
         st = os.stat(path)
     except OSError:
         return scan_transcript(None)
-    c = _scan_cache.get(path)
+    c = _scan_cache.get((path, nbytes))
     if not c or c[0] != st.st_mtime or c[1] != st.st_size:
-        c = _scan_cache[path] = (st.st_mtime, st.st_size, scan_transcript(path, 120_000))
+        c = _scan_cache[(path, nbytes)] = (st.st_mtime, st.st_size, scan_transcript(path, nbytes))
     return c[2]
 
 
@@ -678,8 +840,10 @@ def codex_rows(since_ms=0, ids=None):
             q = f"select {cols} from threads where id in ({','.join('?' * len(ids))})"
             cur = con.execute(q, list(ids))
         else:
-            cur = con.execute(f"select {cols} from threads where archived = 0 and originator in (?, ?) "
-                              "and updated_at_ms > ? order by updated_at_ms desc", (*CODEX_ORIGINATORS, since_ms))
+            # Dấu + tắt chỉ mục archived (hầu hết luồng đều archived = 0) để SQLite đi theo chỉ mục updated_at_ms:
+            # chỉ chạm các luồng trong khung giờ thay vì cả vạn luồng (~27 ms -> ~1 ms).
+            cur = con.execute(f"select {cols} from threads where updated_at_ms > ? and +archived = 0 "
+                              "and +originator in (?, ?) order by updated_at_ms desc", (since_ms, *CODEX_ORIGINATORS))
         names = [c[0] for c in cur.description]
         rows = [dict(zip(names, r)) for r in cur.fetchall()]
         unread = {r[0] for r in con.execute(
@@ -909,7 +1073,12 @@ def codex_detail(sid, want_summary=False, force=False):
     kid_rows = []
     if con:
         try:
-            kid_ids = [x[0] for x in con.execute("select id from threads where source like ?", (f'%"parent_thread_id":"{tid}"%',))]
+            # Luồng con sinh ra sau luồng cha nên cập nhật sau lúc cha tạo: lọc theo chỉ mục updated_at_ms (lùi 1 ngày
+            # cho chắc) trước khi so chuỗi, thay vì so chuỗi trên cả vạn luồng (~10 ms -> dưới 1 ms với luồng mới).
+            like, since = f'%"parent_thread_id":"{tid}"%', (r.get("created_at_ms") or 0) - 86400_000
+            kid_ids = [x[0] for x in con.execute(
+                "select id from threads where updated_at_ms >= ? and source like ? "
+                "union all select id from threads where updated_at_ms is null and source like ?", (since, like, like))]
         except sqlite3.Error:
             kid_ids = []
         finally:
@@ -970,7 +1139,7 @@ def load_marks():
 
 def set_marks(ids, kind):
     """kind = "xong" | "an" | None (bỏ đánh dấu). Ghi mốc hoạt động hiện tại để biết khi nào có việc mới."""
-    seen = {r["sessionId"]: r.get("lastActivityAt") or 0 for r in registry()}
+    seen = {office_id(r): r.get("lastActivityAt") or 0 for r in registry()}
     seen.update(codex_known())
     with _marks_lock:
         marks = load_marks()
@@ -1006,8 +1175,8 @@ def build_state(hours=WINDOW_HOURS):
     for rec in registry():
         if rec.get("isArchived"):
             continue
-        sid = rec["sessionId"]
-        lv = live.get(sid) or live.get(rec.get("cliSessionId") or "")
+        sid = office_id(rec)
+        lv = live_of(rec, live)
         recent = now_ms - (rec.get("lastActivityAt") or 0) < hours * 3600_000
         if not lv and not recent:
             continue
@@ -1021,7 +1190,8 @@ def build_state(hours=WINDOW_HOURS):
         email = _identity["accounts"].get(rec["accountUuid"], "")
         st = status_of(rec, lv)
         summary = rec.get("postTurnSummary") or {}
-        mark = live_mark(marks.get(sid), rec, st)
+        # Dấu cũ đặt khi hai bản sao còn chung một mã thì vẫn giữ cho cả hai tới lần đánh dấu sau.
+        mark = live_mark(marks.get(sid) or marks.get(rec["sessionId"]), rec, st)
         sessions.append({
             "id": sid,
             "title": rec.get("title") or scan["aiTitle"] or os.path.basename(rec.get("cwd") or ""),
@@ -1042,7 +1212,7 @@ def build_state(hours=WINDOW_HOURS):
             "subs": subs,
             "subActive": sub_active,
             "subTotal": sub_total,
-            "parent": (rec.get("spawnedFrom") or {}).get("sessionId"),
+            "parent": parent_id(rec),
             "reply": _replies.get(sid),
             "mark": mark["kind"] if mark else None,
             "cache": scan["cache"],
@@ -1091,10 +1261,8 @@ def load_views():
 
 
 def find_session(sid):
-    for rec in registry():
-        if rec["sessionId"] == sid:
-            return rec
-    return None
+    registry()
+    return _registry_ids["by"].get(sid)
 
 
 # ---------- tóm tắt (tuỳ chọn, khai trong cấu hình mục "tomTat") ----------
@@ -1166,7 +1334,7 @@ def run_summarizer(user, last):
 def summarize(rec, scan, force=False):
     if not summary_enabled():
         return {"error": "Chưa khai bộ tóm tắt trong ~/.claude/van-phong/cau-hinh.json (mục tomTat)"}
-    cache_file = os.path.join(STATE_DIR, "tom-tat", rec["sessionId"] + ".json")
+    cache_file = os.path.join(STATE_DIR, "tom-tat", (office_id(rec) if rec.get("file") else rec["sessionId"]) + ".json")
     key = rec.get("lastAssistantUuid") or str(rec.get("lastActivityAt"))
     cached = load_json(cache_file)
     if cached and cached.get("key") == key and not force:
@@ -1191,9 +1359,9 @@ def session_detail(sid, want_summary=False, force=False):
     if not rec:
         return None
     live = live_records()
-    lv = live.get(sid) or live.get(rec.get("cliSessionId") or "")
+    lv = live_of(rec, live)
     tpath = transcript_of(rec.get("cliSessionId"))
-    scan = scan_transcript(tpath, 400_000)
+    scan = scan_cached(tpath, 400_000)
     proj, sub = project_of(rec.get("originCwd") or rec.get("cwd"))
     email = _identity["accounts"].get(rec["accountUuid"], "")
     cached = load_json(os.path.join(STATE_DIR, "tom-tat", sid + ".json"))
@@ -1203,12 +1371,12 @@ def session_detail(sid, want_summary=False, force=False):
         sum_res = summarize(rec, scan, force=force)
     all_subs = subagents_of(tpath)
     regs = registry()
-    titles = {r["sessionId"]: r.get("title") or "" for r in regs}
-    parent = (rec.get("spawnedFrom") or {}).get("sessionId")
-    children = [{"id": r["sessionId"], "title": r.get("title") or "", "archived": bool(r.get("isArchived"))}
-                for r in regs if (r.get("spawnedFrom") or {}).get("sessionId") == sid]
+    titles = {office_id(r): r.get("title") or "" for r in regs}
+    parent = parent_id(rec)
+    children = [{"id": office_id(r), "title": r.get("title") or "", "archived": bool(r.get("isArchived"))}
+                for r in regs if (r.get("spawnedFrom") or {}).get("sessionId") == rec["sessionId"] and parent_id(r) == sid]
     return {
-        "id": sid, "cli": rec.get("cliSessionId"), "title": rec.get("title") or scan["aiTitle"],
+        "id": sid, "local": rec["sessionId"], "cli": rec.get("cliSessionId"), "title": rec.get("title") or scan["aiTitle"],
         "status": status_of(rec, lv), "live": bool(lv), "app": app_number(rec["appDir"]),
         "mark": (live_mark(load_marks().get(sid), rec, status_of(rec, lv)) or {}).get("kind"),
         "email": email, "org": org_label(rec["orgUuid"], email), "orgUuid": rec["orgUuid"],
@@ -1241,7 +1409,7 @@ def send_reply(sid, text):
         return {"ok": False, "error": "Phiên đang chạy tiếp lượt trước, đợi xong rồi gửi lại"}
     prompt = f"{cau_hinh().get('tienToTraLoi') or DEFAULT_REPLY_PREFIX}\n{text}"
     live = live_records()
-    lv = live.get(sid) or live.get(cli or "")
+    lv = live_of(rec, live)
     if lv and lv.get("messagingSocketPath") and os.path.exists(lv["messagingSocketPath"]):
         ok = deliver_live(lv, prompt)
         _replies[sid] = {"at": int(time.time() * 1000), "state": "da-gui" if ok else "loi", "text": text[:200],
@@ -1357,7 +1525,7 @@ def compact_session(sid):
     if not rec or not rec.get("cliSessionId"):
         return {"ok": False, "error": "Không tìm thấy phiên"}
     live = live_records()
-    if live.get(sid) or live.get(rec["cliSessionId"]):
+    if live_of(rec, live):
         return {"ok": False, "live": True}
     if (_compacts.get(sid) or {}).get("state") == "dang-chay":
         return {"ok": False, "error": "Đang compact rồi, đợi xong"}
@@ -1436,7 +1604,7 @@ def open_in_app(sid):
         if not pid:
             return {"ok": False, "error": f"Đã bấm mở bản {num} nhưng chưa thấy tiến trình"}
         time.sleep(4)  # chờ app nạp xong danh sách phiên
-    url = "claude://code/continue?session=" + urllib.parse.quote(sid)
+    url = "claude://code/continue?session=" + urllib.parse.quote(rec["sessionId"])
     r = subprocess.run(["osascript", "-l", "JavaScript", SEND_URL_JS, str(pid), url], capture_output=True, text=True)
     subprocess.run(["osascript", "-e",
                     f'tell application "System Events" to set frontmost of (first process whose unix id is {pid}) to true'],
@@ -1477,7 +1645,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, load_views())
             if u.path == "/api/quota":
                 return self.send(200, get_quota(force=bool(q.get("moi"))))
-            m = re.fullmatch(r"/api/session/((?:local|codex)_[A-Za-z0-9-]+)", u.path)
+            m = re.fullmatch(r"/api/session/((?:local|codex)_[A-Za-z0-9_-]+)", u.path)
             if m:
                 d = session_detail(m.group(1))
                 return self.send(200 if d else 404, d or {"error": "không thấy phiên"})
@@ -1510,14 +1678,14 @@ class Handler(BaseHTTPRequestHandler):
             _quota["at"] = 0
             return self.send(200, {"ok": True})
         if u.path == "/api/mark":
-            ids = [i for i in body.get("ids") or [] if re.fullmatch(r"(?:local|codex)_[A-Za-z0-9-]+", str(i))]
+            ids = [i for i in body.get("ids") or [] if re.fullmatch(r"(?:local|codex)_[A-Za-z0-9_-]+", str(i))]
             kind = body.get("kind")
             if kind not in ("xong", "an", None) or not ids:
                 return self.send(400, {"error": "thiếu phiên hoặc sai loại đánh dấu"})
             set_marks(ids, kind)
             log(f"đánh dấu {kind} cho {len(ids)} phiên")
             return self.send(200, {"ok": True, "count": len(ids)})
-        m = re.fullmatch(r"/api/session/((?:local|codex)_[A-Za-z0-9-]+)/(summary|reply|open|compact)", u.path)
+        m = re.fullmatch(r"/api/session/((?:local|codex)_[A-Za-z0-9_-]+)/(summary|reply|open|compact)", u.path)
         if not m:
             return self.send(404, {"error": "không có"})
         sid, action = m.groups()

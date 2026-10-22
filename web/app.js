@@ -78,6 +78,7 @@ function cacheChip(cache, busy, big) {
   return `<span class="cache-chip${big ? " big" : ""}" data-until="${until}" data-busy="${busy ? 1 : 0}"></span>`;
 }
 function tickCache() {
+  if (document.hidden) return;
   const now = Date.now();
   document.querySelectorAll(".cache-chip").forEach((el) => {
     const left = Number(el.dataset.until) - now, busy = el.dataset.busy === "1", big = el.classList.contains("big");
@@ -417,7 +418,12 @@ function renderHeader() {
   renderProjectMenu();
   const marked = all.filter((s) => s.mark).length;
   $("#sub").textContent = `${all.length} phiên trong ${labelGio(state.hours)}${marked ? ` · ${marked} đã đánh dấu` : ""} · cập nhật ${new Date(state.at).toLocaleTimeString("vi-VN")}`;
-  const cho = all.filter((s) => s.status === "cho" && !s.mark).length;
+  updateTitle();
+}
+
+// Tiêu đề "(N) Văn phòng Claude": app đọc nó để hiện chấm đỏ trên Dock.
+function updateTitle() {
+  const cho = allSessions().filter((s) => s.status === "cho" && !s.mark).length;
   document.title = (cho ? `(${cho}) ` : "") + "Văn phòng Claude";
 }
 
@@ -669,7 +675,7 @@ function handoffText(d) {
       `- Mã phiên Codex: ${d.cli} (app Codex trong ChatGPT, mở bằng codex://threads/${d.cli})`,
       `- Mở lại bằng CLI: cd ${d.cwd} && codex resume ${d.cli}`,
     ] : [
-      `- Mã phiên: ${d.cli} (app bản ${d.app}, ${d.id})`,
+      `- Mã phiên: ${d.cli} (app bản ${d.app}, ${d.local || d.id})`,
       `- Mở lại bằng CLI: cd ${d.cwd} && claude --resume ${d.cli}`,
       `- Nick: ${d.email || "?"} · ${d.org}${d.plan ? ` (${d.plan})` : ""}`,
     ]),
@@ -703,12 +709,15 @@ function familyHTML(d) {
     ${subs.length ? `<h4>Subagent</h4><ul class="sublist">${subList}</ul>` : ""}</details>`;
 }
 
+// HTML bảng chi tiết openDetail vẽ lần cuối; chỗ nào khác sửa vào bảng thì xoá để lần sau vẽ lại đủ.
+let detailShown = "";
 async function openDetail(id, { quiet } = {}) {
   openId = id;
   document.querySelectorAll(".desk.selected").forEach((e) => e.classList.remove("selected"));
   document.querySelector(`.desk[data-id="${id}"]`)?.classList.add("selected");
   const drawer = $("#drawer");
   if (!quiet) {
+    detailShown = "";
     $("#detail").innerHTML = `<div class="loading"><img src="assets/tro-ly.png" alt=""> Đang mở hồ sơ…</div>`;
     drawer.classList.add("open");
     drawer.setAttribute("aria-hidden", "false");
@@ -716,12 +725,15 @@ async function openDetail(id, { quiet } = {}) {
   }
   const d = await api(`/api/session/${id}`);
   if (openId !== id) return;
-  if (d.error) { $("#detail").innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
+  if (d.error) { detailShown = ""; $("#detail").innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
   const draft = $("#reply-text")?.value || "";
   const focused = document.activeElement?.id === "reply-text";
   const openState = new Map([...$("#detail").querySelectorAll("details")].map((x) => [x.className, x.open]));
   current = d;
-  $("#detail").innerHTML = detailHTML(d);
+  const html = detailHTML(d);
+  if (quiet && html === detailShown) return;   // không đổi gì so với lần vẽ trước: giữ nguyên bảng
+  $("#detail").innerHTML = html;
+  detailShown = html;
   if (quiet) $("#detail").querySelectorAll("details").forEach((x) => { if (openState.has(x.className)) x.open = openState.get(x.className); });
   tickCache();
   if (draft) $("#reply-text").value = draft;
@@ -731,11 +743,13 @@ async function openDetail(id, { quiet } = {}) {
 }
 
 async function summarize(id, force) {
+  detailShown = "";
   const box = $("#sum");
   if (box) box.insertAdjacentHTML("beforeend", `<div class="loading small"><span class="dots"><i></i><i></i><i></i></span> đang tóm tắt…</div>`);
   const d = await api(`/api/session/${id}/summary`, { force });
   if (openId !== id || !$("#sum")) return;
   if (d.error) { toast(d.error, true); return; }
+  detailShown = "";
   $("#sum").innerHTML = summaryHTML(d);
 }
 
@@ -778,8 +792,9 @@ async function doCompact(d) {
   }
   if (!(compactArmed && compactArmed.id === d.id && compactArmed.until > Date.now())) {
     compactArmed = { id: d.id, until: Date.now() + 5000 };
+    detailShown = "";
     $("#detail").innerHTML = detailHTML(d);
-    setTimeout(() => { if (current && current.id === d.id) { $("#detail").innerHTML = detailHTML(current); tickCache(); } }, 5100);
+    setTimeout(() => { if (current && current.id === d.id) { detailShown = ""; $("#detail").innerHTML = detailHTML(current); tickCache(); } }, 5100);
     return;
   }
   compactArmed = null;
@@ -791,6 +806,7 @@ async function doCompact(d) {
 
 function nameOrg(org, anchor) {
   const li = anchor.closest("li");
+  detailShown = "";
   li.innerHTML = `<form class="name-form inline"><input maxlength="40" placeholder="Tên team, ví dụ: Công ty A"><button class="btn primary">Lưu</button></form>`;
   const input = li.querySelector("input");
   input.focus();
@@ -817,12 +833,14 @@ function teamKey(name) {
 
 async function openInApp() {
   const btn = document.querySelector('[data-act="open"]');
+  detailShown = "";
   btn.disabled = true;
   btn.textContent = "Đang mở app…";
   const r = await api(`/api/session/${openId}/open`, {});
   btn.disabled = false;
   const where = r.app === "Codex" ? "app Codex" : `app Claude bản ${r.app || ""}`;
   btn.textContent = `🖥 Mở trong ${where}`;
+  detailShown = "";
   if (!(current && isCodex(current) && r.ok)) toast(r.ok ? `Đã mở ở ${where}` : (r.error || "Không mở được"), !r.ok);
 }
 
@@ -943,12 +961,15 @@ document.addEventListener("click", (e) => {
   if (t) setTab(t);
   if (e.target.id === "q-refresh") loadQuota(true);
 });
-setInterval(() => { if (tab === "quota") loadQuota(false); }, 60000);
+setInterval(() => { if (tab === "quota" && !document.hidden) loadQuota(false); }, 60000);
 
 // ---------- vòng làm mới ----------
 
+// Cửa sổ ẩn (thu nhỏ, bị che hết, tab khác): không vẽ lại văn phòng, chỉ giữ tiêu đề cho chấm đỏ Dock.
+// Hiện lại thì vẽ ngay với dữ liệu mới nhất nên người xem không thấy khác gì.
 function render() {
   if (!state) return;
+  if (document.hidden) { updateTitle(); return; }
   renderHeader();
   renderOffice();
   renderViews();
@@ -1083,6 +1104,13 @@ $("#detail").addEventListener("click", (e) => {
   setInterval(refresh, 3000);
   setInterval(() => {
     const typing = document.activeElement?.matches?.("#detail input, #detail textarea");
-    if (openId && !typing) openDetail(openId, { quiet: true });
+    if (openId && !typing && !document.hidden) openDetail(openId, { quiet: true });
   }, 6000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    render();
+    refresh();
+    if (openId) openDetail(openId, { quiet: true });
+    if (tab === "quota") loadQuota(false);
+  });
 })();

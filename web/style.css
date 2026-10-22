@@ -127,7 +127,7 @@ h1 { margin: 0; font-size: 26px; font-weight: 800; letter-spacing: -0.02em; }
 .st-lam .glow { background: rgba(24, 160, 184, .45); }
 .st-cho .glow { background: rgba(229, 72, 77, .55); animation: pulse 1.2s ease-in-out infinite; }
 .st-xem .glow { background: rgba(224, 162, 27, .5); }
-.st-lam .who { animation: type .5s steps(2) infinite; }
+.st-lam .who { animation: type .5s linear infinite; }
 .st-cho .who { animation: wave 1.1s ease-in-out infinite; transform-origin: 50% 100%; }
 .st-nghi .who { filter: grayscale(.85) brightness(1.05); opacity: .55; }
 .st-nghi .plate, .st-nghi .meta { opacity: .65; }
@@ -251,7 +251,9 @@ blockquote { margin: 8px 0 0; padding: 8px 10px; border-left: 3px solid #d9c4ab;
 .toast.bad { background: var(--cho); }
 
 /* ---------- chuyển động ---------- */
-@keyframes type { 0% { transform: translateY(0); } 100% { transform: translateY(-2px); } }
+/* Gõ phím: đứng 0,25 giây rồi nhích 1px, y hệt steps(2) cũ. steps() bắt trình duyệt tự vẽ từng khung hình
+   (~3% CPU khi cửa sổ mở); viết bằng hai mốc giữ nguyên thì card đồ hoạ chạy hộ. */
+@keyframes type { 0%, 49.99% { transform: translateY(0); } 50%, 100% { transform: translateY(-1px); } }
 @keyframes wave { 0%, 100% { transform: rotate(0); } 25% { transform: rotate(-2deg); } 75% { transform: rotate(2deg); } }
 @keyframes bob { 0%, 100% { transform: translate(-50%, 0); } 50% { transform: translate(-50%, -4px); } }
 @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
