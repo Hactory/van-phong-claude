@@ -678,13 +678,15 @@ def scan_cached(path, nbytes=120_000):
 def scan_transcript(path, nbytes=200_000):
     """Hoạt động gần nhất, lời Claude cuối, yêu cầu cuối của người dùng, nhánh git, PR."""
     res = {"activity": "", "activityAt": 0, "lastText": "", "lastUser": "", "branch": "",
-           "entrypoint": "", "aiTitle": "", "timeline": [], "prs": [], "cache": None}
+           "entrypoint": "", "aiTitle": "", "timeline": [], "prs": [], "cache": None, "ask": "", "askActions": []}
     if not path:
         return res
     entries = read_tail(path, nbytes)
     acc = UsageAcc()
     for e in entries:
         acc.feed(e)
+        if is_human_prompt(e):                  # người dùng đã trả lời: câu hỏi của lượt trước hết hiệu lực
+            res["ask"], res["askActions"] = "", []
         res["entrypoint"] = e.get("entrypoint") or res["entrypoint"]
         if e.get("gitBranch") and e.get("gitBranch") != "HEAD":
             res["branch"] = e["gitBranch"]
@@ -701,6 +703,8 @@ def scan_transcript(path, nbytes=200_000):
                     continue
                 if b.get("type") == "tool_use":
                     name = b.get("name", "")
+                    if name == "mcp__ccd_turn__wrap_up":
+                        res["ask"], res["askActions"] = wrap_up_ask(b.get("input"))
                     if name.startswith("mcp__ccd_turn__") or name in ("TodoWrite",):
                         continue
                     res["timeline"].append({"at": e.get("timestamp"), "kind": "tool",
@@ -729,6 +733,32 @@ def scan_transcript(path, nbytes=200_000):
     res["timeline"] = res["timeline"][-14:]
     res["cache"] = acc.cache()
     return res
+
+
+APP_ACTIONS = {"commit": "Commit", "create_pr": "Tạo PR", "merge": "Merge", "fix_ci": "Sửa CI", "address_comments": "Xử lý góp ý",
+               "resolve_conflicts": "Gỡ xung đột", "verify": "Kiểm tra", "archive": "Lưu trữ phiên", "new_session": "Phiên mới"}
+
+
+def wrap_up_ask(inp):
+    """Câu hỏi + các nút ở hộp "bước tiếp" mà Claude để lại cuối lượt (tool wrap_up của app). Lượt kết bằng câu hỏi
+    là phiên đang chờ người dùng quyết, dù bản tóm tắt của app chấm lượt đó là "completed"."""
+    inp = inp if isinstance(inp, dict) else {}
+    ask = str(inp.get("ask") or "").strip()
+    if not ask:
+        return "", []
+    acts = inp.get("actions") or []
+    if isinstance(acts, str):
+        try:
+            acts = json.loads(acts)
+        except ValueError:
+            acts = []
+    out = []
+    for a in acts if isinstance(acts, list) else []:
+        if isinstance(a, dict) and (a.get("label") or a.get("action")):
+            act = str(a.get("action") or "")
+            out.append({"label": str(a.get("label") or APP_ACTIONS.get(act, act)),
+                        "message": str(a.get("message") or a.get("label") or ""), "app": bool(act)})
+    return ask, out[:3]
 
 
 def iso_ms(s):
@@ -1115,17 +1145,31 @@ def open_codex(sid):
 
 # ---------- trạng thái ----------
 
-def status_of(rec, live):
-    """lam (đang chạy) · cho (chờ người dùng) · xem (xong, cần xem lại) · ranh (mở, rảnh) · nghi (đã đóng)."""
+def status_of(rec, live, ask=""):
+    """lam (đang chạy) · cho (chờ người dùng) · xem (xong, cần xem lại) · ranh (mở, rảnh) · nghi (đã đóng).
+    cho gồm: app đang mở hộp hỏi chờ bấm (phiên "waiting": xin quyền, câu hỏi, thẻ mở phiên mới…), lượt cuối bị chặn
+    hoặc có việc cần làm theo tóm tắt của app, và lượt cuối kết bằng câu hỏi ở hộp "bước tiếp" (ask)."""
     if live and live.get("status") == "busy":
         return "lam"
+    if live and live.get("status") == "waiting":
+        return "cho"
     s = rec.get("postTurnSummary") or {}
     cat = s.get("status_category")
-    if cat == "blocked" or (s.get("needs_action") or "").strip():
+    if cat == "blocked" or (s.get("needs_action") or "").strip() or ask:
         return "cho"
     if cat == "review_ready":
         return "xem"
     return "ranh" if live else "nghi"
+
+
+WAITING_TEXT = "App đang mở hộp hỏi, chờ bạn bấm"
+
+
+def needs_of(rec, live, ask=""):
+    """Câu "cần bạn làm" đi kèm trạng thái cho: hộp hỏi đang mở, rồi việc cần làm theo tóm tắt app, rồi câu hỏi cuối lượt."""
+    if live and live.get("status") == "waiting":
+        return WAITING_TEXT
+    return ((rec.get("postTurnSummary") or {}).get("needs_action") or "").strip() or ask
 
 
 _state_cache = {}  # số giờ -> (lúc dựng, dữ liệu)
@@ -1188,7 +1232,7 @@ def build_state(hours=WINDOW_HOURS):
         subs, sub_active, sub_total = subagent_summary(subagents_of(tpath))
         proj, sub = project_of(rec.get("originCwd") or rec.get("cwd"))
         email = _identity["accounts"].get(rec["accountUuid"], "")
-        st = status_of(rec, lv)
+        st = status_of(rec, lv, scan["ask"])
         summary = rec.get("postTurnSummary") or {}
         # Dấu cũ đặt khi hai bản sao còn chung một mã thì vẫn giữ cho cả hai tới lần đánh dấu sau.
         mark = live_mark(marks.get(sid) or marks.get(rec["sessionId"]), rec, st)
@@ -1207,7 +1251,7 @@ def build_state(hours=WINDOW_HOURS):
             "routine": rec.get("scheduledTaskId") or "",
             "activity": scan["activity"] if st == "lam" else "",
             "detail": summary.get("status_detail", ""),
-            "needs": summary.get("needs_action", ""),
+            "needs": needs_of(rec, lv, scan["ask"]),
             "lastActivityAt": max(rec.get("lastActivityAt") or 0, scan["activityAt"]),
             "subs": subs,
             "subActive": sub_active,
@@ -1377,8 +1421,10 @@ def session_detail(sid, want_summary=False, force=False):
                 for r in regs if (r.get("spawnedFrom") or {}).get("sessionId") == rec["sessionId"] and parent_id(r) == sid]
     return {
         "id": sid, "local": rec["sessionId"], "cli": rec.get("cliSessionId"), "title": rec.get("title") or scan["aiTitle"],
-        "status": status_of(rec, lv), "live": bool(lv), "app": app_number(rec["appDir"]),
-        "mark": (live_mark(load_marks().get(sid), rec, status_of(rec, lv)) or {}).get("kind"),
+        "status": status_of(rec, lv, scan["ask"]), "live": bool(lv), "app": app_number(rec["appDir"]),
+        "mark": (live_mark(load_marks().get(sid), rec, status_of(rec, lv, scan["ask"])) or {}).get("kind"),
+        "ask": scan["ask"], "askActions": scan["askActions"],
+        "waiting": WAITING_TEXT if lv and lv.get("status") == "waiting" else "",
         "email": email, "org": org_label(rec["orgUuid"], email), "orgUuid": rec["orgUuid"],
         "plan": plan_label(rec["orgUuid"]),
         "project": proj, "projectName": project_config().get(proj, {}).get("ten", proj),

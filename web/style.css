@@ -205,6 +205,11 @@ h1 { margin: 0; font-size: 26px; font-weight: 800; letter-spacing: -0.02em; }
 .decide { background: #fff1f0; border-left: 4px solid var(--cho); border-radius: 8px; padding: 8px 10px; margin: 8px 0; }
 .decide ol { margin: 6px 0 0; padding-left: 20px; }
 .decide li { margin: 4px 0; }
+.decide.ask p { margin: 4px 0 0; }
+.decide .opts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.decide .opt { font: inherit; font-size: 13px; padding: 4px 10px; border-radius: 999px; border: 1.5px solid var(--cho); background: #fff; color: #7a1f22; cursor: pointer; }
+.decide .opt:hover { background: #ffe3e1; }
+.decide .opt.app { border-style: dashed; cursor: default; color: #8a6a6a; }
 .via { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
 .muted { color: var(--muted); }
 .err { color: var(--cho); font-weight: 600; }

@@ -565,6 +565,17 @@ function summaryHTML(d) {
   return base + err + btn;
 }
 
+// Phiên đang chờ bạn: hộp hỏi đang mở trong app, hoặc câu hỏi Claude để lại ở hộp "bước tiếp" cuối lượt.
+// Bấm một lựa chọn chỉ điền sẵn câu trả lời vào ô bên dưới, chưa gửi; nút việc của app (merge, commit…) phải bấm trong app.
+function askHTML(d) {
+  if (d.waiting) return `<div class="decide ask"><b>${esc(d.waiting)}</b><p>Có thể là xin quyền, câu hỏi hoặc thẻ mở phiên mới. Bấm "Mở trong app" để trả lời.</p></div>`;
+  if (!d.ask) return "";
+  const opts = (d.askActions || []).map((a) => a.app
+    ? `<span class="opt app" title="Nút của app, bấm trong app">${esc(a.label)}</span>`
+    : `<button class="opt" data-act="ask-fill" data-msg="${esc(a.message || a.label)}" title="${esc(a.message || a.label)}">${esc(a.label)}</button>`).join("");
+  return `<div class="decide ask"><b>Claude hỏi:</b><p>${linkify(d.ask)}</p>${opts ? `<div class="opts">${opts}</div>` : ""}</div>`;
+}
+
 // Nút đánh dấu chỉ là biểu tượng, nằm góc trên cạnh nút đóng, xa nút "Mở trong app" để khỏi bấm nhầm.
 function markTools(d) {
   if (d.mark) return `<button class="tool" data-act="unmark" title="Bỏ đánh dấu, đưa về bàn" aria-label="Bỏ đánh dấu">↺</button>`;
@@ -601,6 +612,7 @@ function detailHTML(d) {
     </ul>
     ${isCodex(d) ? codexMetricsHTML(d) : metricsHTML(d)}
     ${toolRowHTML(d)}
+    ${askHTML(d)}
     <section class="sum" id="sum">${summaryHTML(d)}</section>
     <section class="actions">
       <button class="btn primary wide" data-act="open">🖥 Mở trong app ${isCodex(d) ? "Codex" : `Claude bản ${esc(d.app)}`}</button>
@@ -1084,6 +1096,7 @@ $("#detail").addEventListener("click", (e) => {
   if (act === "copy-id" && current) copyText(current.cli).then((ok) => toast(ok ? `Đã copy ID: ${current.cli}` : "Không copy được", !ok));
   if (act === "handoff" && current) copyText(handoffText(current)).then((ok) => toast(ok ? "Đã copy bản handoff, dán vào phiên mới" : "Không copy được", !ok));
   if (act === "compact" && current) doCompact(current);
+  if (act === "ask-fill") { const box = $("#reply-text"); if (box) { box.value = e.target.closest("[data-msg]").dataset.msg; box.focus(); } }
   if (act === "name-org") nameOrg(e.target.closest("[data-org]").dataset.org, e.target);
   const go = e.target.closest("[data-goto]")?.dataset.goto;
   if (go) openDetail(go);
