@@ -72,6 +72,16 @@ chưa) và `~/.codex/thread_history_N.sqlite` (từng lượt, từng mục). L�
 không hiện. Trả lời: app Codex giữ khoá ghi của phiên, nên nút "Chép & mở" chép câu trả lời rồi mở đúng
 phiên (`codex://threads/<id>`), bạn dán rồi Enter.
 
+## Dự án (Beta)
+
+Mục "Dự án" của app Claude chạy phiên điều phối và các luồng việc trên máy ảo đám mây của Anthropic, nên trên
+máy không có nhật ký. Văn phòng hỏi máy chủ đúng các đường app dùng (`/v1/code/channels`,
+`/v1/code/sessions`) bằng token của chính các phiên app đang mở (chỉ đọc trong bộ nhớ, không in, không lưu),
+trong luồng nền, tối đa 45 giây một lần và chỉ khi trang đang mở. Mỗi dự án là một phòng: bàn "Điều phối"
+cộng các luồng việc đang chạy, đang chờ bạn hoặc lỗi; luồng chạy trên chính máy này đã có bàn riêng nên không
+hiện lại. "Mở dự án trong app" mở đúng trang dự án ở bản app đăng nhập nick đó; trả lời thì chép rồi mở như
+Codex. Không có phiên app nào đang mở của nick đó thì phòng dự án không hiện.
+
 ## Tab Quota
 
 Gom mọi túi quota (một email trong một tổ chức) bằng `collect.py`: nhóm **Kho nick** (claude-swap) và
@@ -107,8 +117,8 @@ Support/Claude-NN`; văn phòng nhận bản theo đúng thư mục đó.
 - Chỉ ĐỌC dữ liệu app tự ghi, không sửa file nào của app Claude hay Codex. Chỉ ghi vào
   `~/.claude/van-phong/` (đánh dấu, màn hình đã lưu, đệm tóm tắt, tên tổ chức, log) và
   `~/.cache/claude-quota/live.json` (chỉ số %).
-- Không gửi gì ra ngoài, trừ: bộ tóm tắt bạn tự khai, và lượt hỏi quota tới `api.anthropic.com` của tab
-  Quota (cần claude-swap).
+- Không gửi gì ra ngoài, trừ: bộ tóm tắt bạn tự khai, lượt hỏi quota tới `api.anthropic.com` của tab
+  Quota (cần claude-swap), và lượt đọc danh sách Dự án tới `api.anthropic.com` (chỉ đọc).
 
 ## Ảnh
 

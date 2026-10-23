@@ -31,7 +31,9 @@ import sqlite3
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOME = os.path.expanduser("~")
@@ -123,6 +125,26 @@ IDENTITY_FILE = os.path.join(STATE_DIR, "danh-tinh.json")
 _identity = {"accounts": {}, "orgs": {}, "learned_at": 0}
 
 
+def proc_envs(pids):
+    """PID -> dòng lệnh kèm biến môi trường (ps eww), một lần ps cho mọi tiến trình."""
+    envs = {}
+    try:
+        pids = ",".join(sorted({str(p) for p in pids if p}))
+        if pids:
+            out = subprocess.run(["ps", "eww", "-o", "pid=,command=", "-p", pids],
+                                 capture_output=True, text=True, timeout=5).stdout
+            want, cur = set(pids.split(",")), None
+            for line in out.splitlines():
+                pid, _, cmd = line.strip().partition(" ")
+                if pid in want and pid not in envs:
+                    cur, envs[pid] = pid, cmd
+                elif cur:                       # biến môi trường có xuống dòng: vẫn thuộc tiến trình trước
+                    envs[cur] += "\n" + line
+    except Exception:  # noqa: BLE001
+        pass
+    return envs
+
+
 def learn_identity():
     """Gom email theo mã tài khoản và tên theo mã tổ chức từ mọi nguồn trên máy, nhớ vào file.
     App không ghi tên tổ chức ra đĩa, nên tên chỉ có khi một CLI/kho nick từng đăng nhập tổ chức đó;
@@ -139,21 +161,7 @@ def learn_identity():
             orgs.setdefault(a["organizationUuid"], a["organizationName"])
     # Phiên app đang mở mang sẵn email + mã tài khoản trong biến môi trường của tiến trình (một lần ps cho mọi phiên).
     lives = list(live_records().values())
-    envs = {}
-    try:
-        pids = ",".join(sorted({str(rec["pid"]) for rec in lives}))
-        if pids:
-            out = subprocess.run(["ps", "eww", "-o", "pid=,command=", "-p", pids],
-                                 capture_output=True, text=True, timeout=5).stdout
-            want, cur = set(pids.split(",")), None
-            for line in out.splitlines():
-                pid, _, cmd = line.strip().partition(" ")
-                if pid in want and pid not in envs:
-                    cur, envs[pid] = pid, cmd
-                elif cur:                       # biến môi trường có xuống dòng: vẫn thuộc tiến trình trước
-                    envs[cur] += "\n" + line
-    except Exception:  # noqa: BLE001
-        pass
+    envs = proc_envs({rec["pid"] for rec in lives})
     for rec in lives:
         out = envs.get(str(rec["pid"]), "")
         env = dict(re.findall(r"\b(CLAUDE_CODE_(?:USER_EMAIL|ACCOUNT_UUID|ORGANIZATION_UUID|SUBSCRIPTION_TYPE|RATE_LIMIT_TIER))=(\S+)", out))
@@ -1143,6 +1151,218 @@ def open_codex(sid):
     return {"ok": r.returncode == 0, "app": "Codex", "error": r.stderr.strip()[:300]}
 
 
+# ---------- dự án (Beta): phiên điều phối và luồng việc trên đám mây ----------
+#
+# Mục "Dự án" của app Claude: mỗi dự án có một phiên điều phối và các luồng việc, đều chạy trên máy ảo đám mây của
+# Anthropic nên trên máy không có nhật ký nào. Văn phòng hỏi máy chủ theo đúng các đường app dùng (/v1/code/channels,
+# /v1/code/sessions) bằng khoá OAuth của chính các phiên app đang mở: lấy từ biến môi trường của tiến trình, chỉ giữ
+# trong bộ nhớ, không ghi ra đĩa. Hỏi trong luồng nền, tối đa mỗi CLOUD_EVERY giây và chỉ khi trang đang hỏi trạng thái.
+
+CLOUD_API = "https://api.anthropic.com"
+CLOUD_PREFIX = "cloud_"       # mã bàn = cloud_<mã phiên trên máy chủ>
+CLOUD_EVERY = 45
+CLOUD_KID_EVERY = 300         # phiên của luồng việc: hỏi lại khi trạng thái luồng đổi hoặc sau 5 phút
+CLOUD_PAUSE = 300             # bị giới hạn lượt (429) thì nghỉ 5 phút
+CLOUD_SECTIONS = ("needs_input", "failed", "working", "idle")   # luồng đã xong hoặc lưu trữ thì thôi hiện
+CLOUD_ICONS = {"Bullhorn": "📣", "DNA": "🧬", "Eye": "👁️", "GraduationCap": "🎓", "Rocket": "🚀", "Lightbulb": "💡",
+               "Code": "💻", "Book": "📚", "Heart": "❤️", "Star": "⭐", "Briefcase": "💼", "Chart": "📊"}
+_cloud = {"at": 0.0, "busy": False, "pause": 0.0, "desks": [], "rooms": {}, "info": {}, "threads": {}, "kids": {}}
+_cloud_lock = threading.Lock()
+
+
+def cloud_tokens():
+    """(mã tài khoản, mã tổ chức) -> [(khoá OAuth, số bản app)…] mới nhất trước, từ các phiên app đang mở. Chỉ lấy phiên
+    mà tổ chức trong khoá trùng tổ chức của bản ghi phiên (phiên cũ có thể còn cầm khoá của tổ chức trước)."""
+    by_sid = {}
+    for r in registry():
+        by_sid.setdefault(r["sessionId"], []).append(r)
+    lives = sorted({id(d): d for d in live_records().values()}.values(), key=lambda d: -(d.get("startedAt") or 0))
+    envs = proc_envs({d.get("pid") for d in lives})
+    out = {}
+    for d in lives:
+        recs = by_sid.get(d.get("hostSessionId") or "") or []
+        rec = next((r for r in recs if r.get("cliSessionId") == d.get("sessionId")), recs[0] if recs else None)
+        if not rec:
+            continue
+        env = dict(re.findall(r"\b(CLAUDE_CODE_(?:OAUTH_TOKEN|ORGANIZATION_UUID|ACCOUNT_UUID))=(\S+)", envs.get(str(d["pid"]), "")))
+        tok, org = env.get("CLAUDE_CODE_OAUTH_TOKEN"), env.get("CLAUDE_CODE_ORGANIZATION_UUID")
+        num = app_number(rec["appDir"])
+        if tok and num and org == rec["orgUuid"]:
+            cands = out.setdefault((env.get("CLAUDE_CODE_ACCOUNT_UUID") or rec["accountUuid"], org), [])
+            if all(t != tok for t, _ in cands):
+                cands.append((tok, num))
+    return out
+
+
+def cloud_get(path, tok, org):
+    req = urllib.request.Request(CLOUD_API + path, headers={
+        "Authorization": f"Bearer {tok}", "anthropic-version": "2023-06-01", "anthropic-beta": "ccr-byoc-2025-07-29",
+        "x-organization-uuid": org, "User-Agent": "van-phong-claude"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.load(r)
+
+
+def cloud_session(sid, tok, org):
+    return (cloud_get(f"/v1/code/sessions/{urllib.parse.quote(sid)}", tok, org) or {}).get("response_shape") or {}
+
+
+def cloud_status(s, section=""):
+    """lam: đang chạy · cho: chờ duyệt, bị chặn, có việc cần làm, luồng chờ trả lời hay lỗi · xem: xong, cần xem
+    · ranh: còn lại (phiên trên đám mây lúc nào cũng mở được)."""
+    pts = s.get("post_turn_summary") or {}
+    if section == "working" or s.get("worker_status") == "running":
+        return "lam"
+    if section in ("needs_input", "failed") or s.get("requires_action_details_list") \
+            or s.get("status_bucket") in ("blocked", "needs_input") or (pts.get("needs_action") or "").strip():
+        return "cho"
+    return "xem" if s.get("status_bucket") == "review_ready" else "ranh"
+
+
+def cloud_needs(s, section, st):
+    if st != "cho":
+        return ""
+    if s.get("requires_action_details_list"):
+        return "Đang chờ bạn duyệt một thao tác trong app"
+    need = ((s.get("post_turn_summary") or {}).get("needs_action") or "").strip()
+    if need:
+        return need
+    return "Luồng việc bị lỗi" if section == "failed" else "Đang chờ bạn trả lời trong dự án"
+
+
+def cloud_desk(s, base, title, room, parent, section=""):
+    pts = s.get("post_turn_summary") or {}
+    st = cloud_status(s, section)
+    return {**base, "id": CLOUD_PREFIX + s["id"], "kind": "cloud", "title": (title or "Phiên dự án")[:90], "project": room,
+            "worktree": "", "branch": "", "status": st, "live": True, "routine": "", "activity": "",
+            "detail": pts.get("status_detail") or "", "needs": cloud_needs(s, section, st),
+            "lastActivityAt": iso_ms(s.get("last_event_at") or s.get("updated_at")),
+            "subs": [], "subActive": 0, "subTotal": 0, "parent": parent, "reply": None, "mark": None, "cache": None}
+
+
+def cloud_refresh():
+    try:
+        desks, rooms, info, seen_kids = [], {}, {}, set()
+        for (acct, org), cands in cloud_tokens().items():
+            chans = tok = num = None
+            for t, n in cands:
+                try:
+                    chans, tok, num = cloud_get("/v1/code/channels?scope=all", t, org).get("data") or [], t, n
+                    break
+                except urllib.error.HTTPError as e:
+                    if e.code not in (401, 403):      # khoá hết hạn hay sai tổ chức: thử khoá của phiên khác
+                        raise
+            if chans is None:
+                continue
+            email = _identity["accounts"].get(acct, "")
+            base = {"app": num, "email": email, "org": org_label(org, email), "plan": plan_label(org)}
+            for ch in chans:
+                if ch.get("archived_at") or ch.get("disabled_at") or not ch.get("channel_session_id"):
+                    continue
+                room = f"du-an-{ch['id']}"
+                rooms[room] = {"ten": ch.get("name") or "Dự án", "bieu_tuong": CLOUD_ICONS.get(ch.get("icon"), "🗂️")}
+                coord = cloud_session(ch["channel_session_id"], tok, org)
+                if not coord.get("id") or coord.get("status") == "archived":
+                    continue
+                cid = CLOUD_PREFIX + coord["id"]
+                desks.append(cloud_desk(coord, base, f"Điều phối · {ch.get('name') or 'Dự án'}", room, None))
+                info[cid] = {"desk": desks[-1], "session": coord, "channel": ch, "org": org, "thread": None, "section": ""}
+                key = (ch.get("last_message_at"), ch.get("updated_at"))
+                th = _cloud["threads"].get(ch["id"])
+                if not th or th[0] != key or time.time() - th[1] > CLOUD_KID_EVERY:
+                    th = _cloud["threads"][ch["id"]] = (key, time.time(), cloud_get(
+                        f"/v1/code/channels/{urllib.parse.quote(ch['id'])}/threads", tok, org).get("sections") or [])
+                for sec in th[2]:
+                    if sec.get("status") not in CLOUD_SECTIONS:
+                        continue
+                    for t in sec.get("data") or []:
+                        for b in t.get("bound_sessions") or []:
+                            if not b.get("id") or b["id"] in seen_kids:
+                                continue
+                            seen_kids.add(b["id"])
+                            k = _cloud["kids"].get(b["id"])
+                            if not k or k[0] != b.get("status_bucket") or time.time() - k[1] > CLOUD_KID_EVERY:
+                                k = _cloud["kids"][b["id"]] = (b.get("status_bucket"), time.time(), cloud_session(b["id"], tok, org))
+                            ks = k[2]
+                            # Luồng chạy trên chính máy này (bridge) đã có bàn riêng từ bản ghi phiên của app.
+                            if not ks.get("id") or ks.get("environment_kind") == "bridge" or ks.get("status") == "archived":
+                                continue
+                            title = b.get("title") or ks.get("title") or (t.get("body") or "").split("\n")[0]
+                            desks.append(cloud_desk(ks, base, title, room, cid, sec["status"]))
+                            info[desks[-1]["id"]] = {"desk": desks[-1], "session": ks, "channel": ch, "org": org,
+                                                     "thread": t, "section": sec["status"]}
+        _cloud.update(desks=desks, rooms=rooms, info=info)
+        _state_cache.clear()
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            _cloud["pause"] = time.time() + CLOUD_PAUSE
+        log(f"dự án trên đám mây lỗi HTTP {e.code}")
+    except (OSError, ValueError) as e:
+        log(f"dự án trên đám mây lỗi: {type(e).__name__}: {e}")
+    finally:
+        _cloud["busy"] = False
+
+
+def cloud_kick():
+    """Gọi mỗi lần trang hỏi trạng thái: tới hạn thì làm mới trong luồng nền, trang không phải chờ mạng."""
+    now = time.time()
+    with _cloud_lock:
+        if _cloud["busy"] or now - _cloud["at"] < CLOUD_EVERY or now < _cloud["pause"]:
+            return
+        _cloud.update(busy=True, at=now)
+    threading.Thread(target=cloud_refresh, daemon=True).start()
+
+
+def cloud_sessions(hours, marks):
+    """Bàn của dự án: phiên điều phối luôn hiện (như phiên đang mở), luồng việc hiện khi đang chạy, chờ bạn
+    hoặc có hoạt động trong khung giờ."""
+    now_ms = time.time() * 1000
+    out = []
+    for d in _cloud["desks"]:
+        if d["parent"] and d["status"] not in ("lam", "cho") and now_ms - d["lastActivityAt"] > hours * 3600_000:
+            continue
+        mark = live_mark(marks.get(d["id"]), d, d["status"])
+        out.append({**d, "mark": mark["kind"] if mark else None})
+    return out
+
+
+def cloud_known():
+    return {d["id"]: d["lastActivityAt"] for d in _cloud["desks"]}
+
+
+def cloud_detail(sid):
+    inf = _cloud["info"].get(sid)
+    if not inf:
+        return None
+    d, s, ch = inf["desk"], inf["session"], inf["channel"]
+    parent = _cloud["info"].get(d["parent"]) if d["parent"] else None
+    kids = [x for x in _cloud["desks"] if x["parent"] == sid]
+    mark = live_mark(load_marks().get(sid), d, d["status"])
+    return {
+        "id": sid, "kind": "cloud", "cli": s.get("id"), "title": d["title"], "status": d["status"], "live": True,
+        "app": d["app"], "mark": mark["kind"] if mark else None, "email": d["email"], "org": d["org"],
+        "orgUuid": inf["org"], "plan": d["plan"], "project": d["project"], "projectName": ch.get("name") or "",
+        "worktree": "", "branch": "", "cwd": "", "model": (s.get("config") or {}).get("model") or "", "routine": "",
+        "appSummary": {"status_detail": d["detail"], "needs_action": d["needs"]}, "aiSummary": None,
+        "lastText": ((s.get("post_turn_summary") or {}).get("recent_action") or ""),
+        "lastUser": ((inf.get("thread") or {}).get("body") or "")[-1500:],
+        "timeline": [], "prs": [], "subs": [], "subActive": 0, "subTotal": 0,
+        "parent": {"id": d["parent"], "title": parent["desk"]["title"]} if parent else None,
+        "children": [{"id": k["id"], "title": k["title"], "archived": False} for k in kids],
+        "lastActivityAt": d["lastActivityAt"], "reply": None, "compact": None, "usage": None, "canSummarize": False,
+        "ask": "", "askActions": [], "waiting": "",
+        "cloud": {"url": s.get("session_url") or "", "channel": ch.get("id"), "section": inf.get("section") or "",
+                  "context": (s.get("external_metadata") or {}).get("context_usage") or {}},
+    }
+
+
+def open_cloud(sid):
+    inf = _cloud["info"].get(sid)
+    if not inf:
+        return {"ok": False, "error": "Không thấy phiên dự án (văn phòng chưa tải xong danh sách dự án)"}
+    url = "claude://claude.ai/epitaxy/project/" + urllib.parse.quote(inf["channel"]["id"])
+    return open_link_in_app(inf["desk"]["app"], url, sid)
+
+
 # ---------- trạng thái ----------
 
 def status_of(rec, live, ask=""):
@@ -1185,6 +1405,7 @@ def set_marks(ids, kind):
     """kind = "xong" | "an" | None (bỏ đánh dấu). Ghi mốc hoạt động hiện tại để biết khi nào có việc mới."""
     seen = {office_id(r): r.get("lastActivityAt") or 0 for r in registry()}
     seen.update(codex_known())
+    seen.update(cloud_known())
     with _marks_lock:
         marks = load_marks()
         for sid in ids:
@@ -1265,6 +1486,9 @@ def build_state(hours=WINDOW_HOURS):
         sessions += codex_sessions(hours, marks)
     except Exception as e:  # noqa: BLE001  (Codex hỏng không được kéo sập cả văn phòng)
         log(f"phiên Codex lỗi: {type(e).__name__}: {e}")
+    sessions += cloud_sessions(hours, marks)
+    for k, v in _cloud["rooms"].items():
+        cfg.setdefault(k, v)
     projects = {}
     for s in sessions:
         p = projects.setdefault(s["project"], {"key": s["project"], "sessions": [],
@@ -1284,6 +1508,7 @@ def build_state(hours=WINDOW_HOURS):
 
 def get_state(hours=WINDOW_HOURS):
     hours = max(1, min(int(hours), MAX_WINDOW_HOURS))
+    cloud_kick()
     with _state_lock:
         c = _state_cache.get(hours)
         if not c or time.time() - c[0] > 1.5:
@@ -1399,6 +1624,8 @@ def summarize(rec, scan, force=False):
 def session_detail(sid, want_summary=False, force=False):
     if sid.startswith(CODEX_PREFIX):
         return codex_detail(sid, want_summary, force)
+    if sid.startswith(CLOUD_PREFIX):
+        return cloud_detail(sid)
     rec = find_session(sid)
     if not rec:
         return None
@@ -1632,10 +1859,17 @@ def app_launcher(num):
 def open_in_app(sid):
     if sid.startswith(CODEX_PREFIX):
         return open_codex(sid)
+    if sid.startswith(CLOUD_PREFIX):
+        return open_cloud(sid)
     rec = find_session(sid)
     if not rec:
         return {"ok": False, "error": "Không tìm thấy phiên"}
-    num = app_number(rec["appDir"])
+    url = "claude://code/continue?session=" + urllib.parse.quote(rec["sessionId"])
+    return open_link_in_app(app_number(rec["appDir"]), url, sid)
+
+
+def open_link_in_app(num, url, label):
+    """Bật bản app nếu đang tắt, gửi link claude:// tới đúng tiến trình đó rồi đưa cửa sổ lên trước."""
     pid = app_pid(num)
     if not pid:
         launcher = app_launcher(num)
@@ -1650,13 +1884,12 @@ def open_in_app(sid):
         if not pid:
             return {"ok": False, "error": f"Đã bấm mở bản {num} nhưng chưa thấy tiến trình"}
         time.sleep(4)  # chờ app nạp xong danh sách phiên
-    url = "claude://code/continue?session=" + urllib.parse.quote(rec["sessionId"])
     r = subprocess.run(["osascript", "-l", "JavaScript", SEND_URL_JS, str(pid), url], capture_output=True, text=True)
     subprocess.run(["osascript", "-e",
                     f'tell application "System Events" to set frontmost of (first process whose unix id is {pid}) to true'],
                    capture_output=True)
     ok = r.returncode == 0
-    log(f"mở {sid[:14]} ở bản {num} (PID {pid}): {'ok' if ok else r.stderr.strip()[:200]}")
+    log(f"mở {label[:14]} ở bản {num} (PID {pid}): {'ok' if ok else r.stderr.strip()[:200]}")
     return {"ok": ok, "app": num, "error": "" if ok else (r.stderr or r.stdout).strip()[:300]}
 
 
@@ -1691,7 +1924,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, load_views())
             if u.path == "/api/quota":
                 return self.send(200, get_quota(force=bool(q.get("moi"))))
-            m = re.fullmatch(r"/api/session/((?:local|codex)_[A-Za-z0-9_-]+)", u.path)
+            m = re.fullmatch(r"/api/session/((?:local|codex|cloud)_[A-Za-z0-9_-]+)", u.path)
             if m:
                 d = session_detail(m.group(1))
                 return self.send(200 if d else 404, d or {"error": "không thấy phiên"})
@@ -1724,17 +1957,19 @@ class Handler(BaseHTTPRequestHandler):
             _quota["at"] = 0
             return self.send(200, {"ok": True})
         if u.path == "/api/mark":
-            ids = [i for i in body.get("ids") or [] if re.fullmatch(r"(?:local|codex)_[A-Za-z0-9_-]+", str(i))]
+            ids = [i for i in body.get("ids") or [] if re.fullmatch(r"(?:local|codex|cloud)_[A-Za-z0-9_-]+", str(i))]
             kind = body.get("kind")
             if kind not in ("xong", "an", None) or not ids:
                 return self.send(400, {"error": "thiếu phiên hoặc sai loại đánh dấu"})
             set_marks(ids, kind)
             log(f"đánh dấu {kind} cho {len(ids)} phiên")
             return self.send(200, {"ok": True, "count": len(ids)})
-        m = re.fullmatch(r"/api/session/((?:local|codex)_[A-Za-z0-9_-]+)/(summary|reply|open|compact)", u.path)
+        m = re.fullmatch(r"/api/session/((?:local|codex|cloud)_[A-Za-z0-9_-]+)/(summary|reply|open|compact)", u.path)
         if not m:
             return self.send(404, {"error": "không có"})
         sid, action = m.groups()
+        if sid.startswith(CLOUD_PREFIX) and action in ("reply", "compact"):
+            return self.send(400, {"ok": False, "error": "Phiên dự án chạy trên đám mây: trả lời ngay trong app"})
         if sid.startswith(CODEX_PREFIX) and action in ("reply", "compact"):
             # App Codex giữ khoá ghi luồng; trang tự chép câu trả lời rồi mở đúng luồng trong app.
             return self.send(400, {"ok": False, "error": "Phiên Codex: trả lời ngay trong app Codex"})

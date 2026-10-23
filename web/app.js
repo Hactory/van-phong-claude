@@ -4,6 +4,8 @@
 const APP_COLOR = { "01": "xanh", "02": "tim", "03": "la", "04": "hong", "05": "vang", CX: "codex" };
 // Phiên Codex mở từ app desktop (ChatGPT) có mã app "CX": cùng nhân vật nhưng tô đen trắng.
 const isCodex = (s) => s.kind === "codex";
+// Phiên điều phối và luồng việc của mục "Dự án" trong app Claude: chạy trên đám mây, mở bằng trang dự án trong app.
+const isCloud = (s) => s.kind === "cloud";
 const appName = (a) => (a === "CX" ? "Codex" : `bản ${a}`);
 const STATUS = {
   cho:  { label: "Chờ bạn",  head: "❓ Cần bạn phản hồi" },
@@ -216,7 +218,8 @@ function deskHTML(s, inPod) {
   const cls = `desk st-${s.status}${s.routine ? " robot" : ""}${s.mark ? " mk-" + s.mark : ""}${s.parent ? " child" : ""}${isCodex(s) ? " codex" : ""}`;
   // Phiên con mà phiên cha không ngồi cùng phòng: ghi rõ là con của ai.
   const parentTitle = s.parent && !inPod ? sessionById(s.parent)?.title : "";
-  const meta = [s.routine ? (isCodex(s) ? "⏰ Automation" : "🤖 Routine") : "", parentTitle ? `↳ con của ${parentTitle}` : "",
+  const meta = [s.routine ? (isCodex(s) ? "⏰ Automation" : "🤖 Routine") : "", isCloud(s) && !s.parent ? "☁️ Dự án" : "",
+    parentTitle ? `↳ con của ${parentTitle}` : "",
     s.subActive && !inPod ? `🛸 ${s.subActive} subagent` : "", ago(s.lastActivityAt)].filter(Boolean).join(" · ");
   return `
     <div class="${cls}" role="button" tabindex="0" data-id="${s.id}" title="${esc(tip)}">
@@ -599,6 +602,7 @@ function detailHTML(d) {
       <div><div class="state">${st.head}${markNote}</div><h2>${esc(d.title)}</h2></div>
     </div>
     <ul class="facts">
+      ${isCloud(d) ? `<li>☁️ Chạy trên đám mây của Anthropic · dự án <b>${esc(d.projectName)}</b></li>` : ""}
       ${isCodex(d) ? `<li>🤖 <span class="chip c-codex">Codex</span> trong app ChatGPT</li>` : `
       <li>👤 ${esc(d.email || "?")} · <span class="chip c-${APP_COLOR[d.app] || "xanh"}">app bản ${esc(d.app)}</span></li>
       <li>🏢 <span class="team t-${teamKey(d.org)}">${esc(d.org)}</span>${d.plan ? ` <small class="muted">${esc(d.plan)}</small>` : ""}
@@ -610,20 +614,21 @@ function detailHTML(d) {
       <li>🕒 ${esc(ago(d.lastActivityAt))}${d.model ? ` · ${esc(d.model)}` : ""}</li>
       ${(d.prs || []).map((u) => `<li>🔗 <a href="${esc(u)}" target="_blank" rel="noopener">${esc(u.replace("https://github.com/", ""))}</a></li>`).join("")}
     </ul>
-    ${isCodex(d) ? codexMetricsHTML(d) : metricsHTML(d)}
+    ${isCodex(d) ? codexMetricsHTML(d) : isCloud(d) ? cloudMetricsHTML(d) : metricsHTML(d)}
     ${toolRowHTML(d)}
     ${askHTML(d)}
     <section class="sum" id="sum">${summaryHTML(d)}</section>
     <section class="actions">
-      <button class="btn primary wide" data-act="open">🖥 Mở trong app ${isCodex(d) ? "Codex" : `Claude bản ${esc(d.app)}`}</button>
+      <button class="btn primary wide" data-act="open">🖥 ${isCloud(d) ? `Mở dự án trong app Claude bản ${esc(d.app)}` : `Mở trong app ${isCodex(d) ? "Codex" : `Claude bản ${esc(d.app)}`}`}</button>
     </section>
     <section class="reply">
       <label for="reply-text">Trả lời phiên</label>
       <textarea id="reply-text" rows="3" placeholder="Gõ câu trả lời, ⌘ + Enter để gửi"></textarea>
       <div class="reply-row">
-        <small>${isCodex(d) ? "App Codex giữ phiên này: văn phòng chép sẵn câu trả lời rồi mở đúng phiên, bấm ⌘V rồi Enter."
+        <small>${isCloud(d) ? "Phiên dự án chạy trên đám mây: văn phòng chép sẵn câu trả lời rồi mở đúng dự án trong app, bấm ⌘V rồi Enter."
+          : isCodex(d) ? "App Codex giữ phiên này: văn phòng chép sẵn câu trả lời rồi mở đúng phiên, bấm ⌘V rồi Enter."
           : d.live ? "Phiên đang mở: tin vào thẳng cửa sổ phiên." : "Phiên đã đóng: chạy tiếp bằng CLI, app chỉ hiện sau khi bản đó khởi động lại."}</small>
-        <button class="btn primary" data-act="reply">${isCodex(d) ? "Chép & mở" : "Gửi"}</button>
+        <button class="btn primary" data-act="reply">${isCodex(d) || isCloud(d) ? "Chép & mở" : "Gửi"}</button>
       </div>
       ${reply}
     </section>
@@ -642,6 +647,13 @@ function codexMetricsHTML(d) {
     <div class="m"><span>📬 Trong app</span><b class="${c.unread ? "t-warn" : "t-ok"}">${c.unread ? "Chưa đọc" : "Đã đọc"}</b>
       <small>${d.live ? "app ChatGPT đang mở" : "app ChatGPT đang tắt"}</small></div>
   </section>`;
+}
+
+function cloudMetricsHTML(d) {
+  const c = (d.cloud && d.cloud.context) || {};
+  if (!c.max_tokens) return "";
+  const pct = Math.round((c.used_tokens / c.max_tokens) * 100);
+  return `<section class="metrics"><div class="m"><span>🧠 Ngữ cảnh</span><b>${pct}%</b><small>${fmtTok(c.used_tokens)} / ${fmtTok(c.max_tokens)}</small></div></section>`;
 }
 
 function metricsHTML(d) {
@@ -672,7 +684,7 @@ function toolRowHTML(d) {
   return `<div class="tool-row">
     <button class="btn" data-act="copy-id" title="${esc(d.cli || "")}">🆔 Copy ID</button>
     <button class="btn" data-act="handoff" title="Chép bản bàn giao: phiên, nick, dự án, tóm tắt, yêu cầu cuối, lời Claude cuối">📋 Copy handoff</button>
-    ${isCodex(d) ? "" : `<button class="btn${armed ? " armed" : ""}" data-act="compact" ${d.status === "lam" || (c && c.state === "dang-chay") ? "disabled" : ""}
+    ${isCodex(d) || isCloud(d) ? "" : `<button class="btn${armed ? " armed" : ""}" data-act="compact" ${d.status === "lam" || (c && c.state === "dang-chay") ? "disabled" : ""}
       title="${d.live ? "Phiên đang mở: chép sẵn /compact rồi mở phiên trong app" : "Phiên đã đóng: compact bằng CLI"}">
       🗜 ${armed ? "Bấm lần nữa để compact" : "Compact"}</button>`}
   </div>${cState}`;
@@ -683,7 +695,11 @@ function handoffText(d) {
   const a = d.appSummary || {};
   const lines = [
     `# Bàn giao phiên: ${d.title}`, "",
-    ...(isCodex(d) ? [
+    ...(isCloud(d) ? [
+      `- Phiên dự án trên đám mây: ${d.cli} (dự án "${d.projectName}", app bản ${d.app})`,
+      ...(d.cloud && d.cloud.url ? [`- Mở trên web: ${d.cloud.url}`] : []),
+      `- Nick: ${d.email || "?"} · ${d.org}${d.plan ? ` (${d.plan})` : ""}`,
+    ] : isCodex(d) ? [
       `- Mã phiên Codex: ${d.cli} (app Codex trong ChatGPT, mở bằng codex://threads/${d.cli})`,
       `- Mở lại bằng CLI: cd ${d.cwd} && codex resume ${d.cli}`,
     ] : [
@@ -777,10 +793,11 @@ async function sendReply() {
   const box = $("#reply-text");
   const text = box.value.trim();
   if (!text || !openId) return;
-  if (current && isCodex(current)) {
+  if (current && (isCodex(current) || isCloud(current))) {
     const ok = await copyText(text);
     await openInApp();
-    toast(ok ? "Đã chép câu trả lời và mở phiên trong app Codex: bấm ⌘V rồi Enter" : "Đã mở phiên trong app Codex, chưa chép được chữ", !ok);
+    const where = isCloud(current) ? `dự án trong app Claude bản ${current.app}` : "phiên trong app Codex";
+    toast(ok ? `Đã chép câu trả lời và mở ${where}: bấm ⌘V rồi Enter` : `Đã mở ${where}, chưa chép được chữ`, !ok);
     if (ok) box.value = "";
     return;
   }
