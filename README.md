@@ -29,6 +29,12 @@ App mang theo bản sao `server.py`, `collect.py`, `tools/` và `web/` trong gó
 tắt khi thoát; số phiên đang chờ bạn hiện thành chấm đỏ trên Dock. Sửa mã xong thì chạy lại `build.sh`.
 Lần đầu bấm "Mở trong app", macOS hỏi quyền điều khiển Claude: chọn Cho phép.
 
+Thanh tiêu đề của app, ngang hàng 3 nút cửa sổ, có dòng tình trạng máy cập nhật mỗi 2 giây: CPU, RAM, phần
+Claude và Codex đang tốn, chỗ trống từng ổ. Phần Claude, Codex gồm cả mọi lệnh chúng chạy hộ (build, test,
+máy chủ MCP); % CPU tính trên cả máy, RAM tính như cột Bộ nhớ của Activity Monitor. Rê chuột vào dòng để xem
+chi tiết (lệnh nào ngốn CPU, giữ RAM nhiều nhất). Số chuyển cam, đỏ khi máy căng hoặc ổ sắp đầy. Mọi số đọc
+thẳng từ macOS, không chạy lệnh ngoài, không gửi đi đâu; cửa sổ bị thu nhỏ hoặc che khuất thì ngừng đo.
+
 ## Trạng thái từng bàn
 
 | Bàn | Nghĩa | Lấy từ |
@@ -106,6 +112,7 @@ chọn; mẫu ở [`cau-hinh.mau.json`](cau-hinh.mau.json).
 | `mauTeam` | màu chip theo tên tổ chức: `tim`, `cam`, `xanh`, `hong`, `vang`, `canhan` |
 | `boQuaLane` | thư mục `~/.claude-*` không phải nơi đăng nhập CLI thật |
 | `claude` | đường dẫn lệnh `claude` nếu không nằm trên PATH |
+| `oDia` | danh sách thư mục của các ổ hiện trên thanh tiêu đề (mặc định: ổ máy và các ổ gắn ngoài ghi được, bỏ Time Machine, Recovery) |
 
 Nhiều bản app chạy song song: mỗi bản là Claude.app chạy với `--user-data-dir=~/Library/Application
 Support/Claude-NN`; văn phòng nhận bản theo đúng thư mục đó.
