@@ -1,7 +1,7 @@
 // Văn phòng Claude: cửa sổ riêng bọc trang http://127.0.0.1:4747.
 // Mở app = bật máy chủ server.py (nằm trong Resources) nếu chưa chạy; tắt app = tắt máy chủ do app bật.
 // Số phiên đang chờ bạn hiện thành chấm đỏ trên biểu tượng Dock (đọc từ tiêu đề trang "(N) Văn phòng Claude").
-// Thanh tiêu đề, ngang hàng 3 nút cửa sổ, có một dòng tình trạng máy: CPU, RAM, phần Claude và Codex đang tốn,
+// Thanh tiêu đề, ngang hàng 3 nút cửa sổ, có một dòng tình trạng máy: CPU, RAM, phần Claude, Codex, Antigravity đang tốn,
 // chỗ trống từng ổ.
 import AppKit
 import WebKit
@@ -374,8 +374,8 @@ final class MachineStats {
         let gib = 1_073_741_824.0
         func pct(_ x: Double) -> String { "\(x < 10 ? MachineStats.num(x, 1) : String(Int(x.rounded())))%" }
         func gb(_ b: UInt64) -> String { "\(MachineStats.num(Double(b) / gib, 1)) GB" }
-        for (label, g, appName, cliName) in [("Claude", u.claude, "app Claude", "phiên Claude Code"),
-                                             ("Codex", u.codex, "app ChatGPT/Codex", "phiên Codex CLI")] where g.count > 0 {
+        for (fam, g) in u.groups.enumerated() where g.count > 0 {
+            let (label, appName, cliName) = AppUsage.labels[fam]
             sep()
             add("\(label) ", MachineStats.ink.withAlphaComponent(0.75))
             add(u.ready ? "\(Int(g.cpu.rounded()))%" : "…", g.cpu >= 85 ? MachineStats.bad : g.cpu >= 60 ? MachineStats.warn : MachineStats.ink)
@@ -391,8 +391,8 @@ final class MachineStats {
             detail.append(lines.joined(separator: "\n"))
         }
 
-        if u.ready && u.claude.count + u.codex.count > 0 {
-            detail.append("(RAM của Claude, Codex tính như cột Bộ nhớ của Activity Monitor, gồm cả phần macOS đã nén hoặc đẩy ra swap, nên có thể lớn hơn RAM đang dùng.)")
+        if u.ready && u.groups.contains(where: { $0.count > 0 }) {
+            detail.append("(RAM của từng nhóm tính như cột Bộ nhớ của Activity Monitor, gồm cả phần macOS đã nén hoặc đẩy ra swap, nên có thể lớn hơn RAM đang dùng.)")
         }
 
         for d in diskList() {
@@ -408,13 +408,24 @@ final class MachineStats {
     }
 }
 
-// MARK: - Claude và Codex đang tốn bao nhiêu, tính cả mọi lệnh chúng chạy hộ (build, test, máy chủ MCP…)
+// MARK: - Claude, Codex, Antigravity đang tốn bao nhiêu, tính cả mọi lệnh chúng chạy hộ (build, test, máy chủ MCP…)
 
 final class AppUsage {
     enum Kind {
-        case claudeApp, claudeCLI, codexApp, codexCLI
-        var isClaude: Bool { self == .claudeApp || self == .claudeCLI }
+        case claudeApp, claudeCLI, codexApp, codexCLI, agApp, agCLI
+        /// Số thứ tự nhóm trong `labels` và trong kết quả của `sample()`.
+        var family: Int {
+            switch self {
+            case .claudeApp, .claudeCLI: return 0
+            case .codexApp, .codexCLI: return 1
+            case .agApp, .agCLI: return 2
+            }
+        }
+        var isCLI: Bool { self == .claudeCLI || self == .codexCLI || self == .agCLI }
     }
+    static let labels = [("Claude", "app Claude", "phiên Claude Code"),
+                         ("Codex", "app ChatGPT/Codex", "phiên Codex CLI"),
+                         ("Antigravity", "app Antigravity", "phiên agy CLI")]
     struct Part { var cpu = 0.0, mem: UInt64 = 0, count = 0 }
     struct Group {
         var app = Part(), cli = Part(), kids = Part()
@@ -438,7 +449,8 @@ final class AppUsage {
     }
 
     /// Nhận diện theo đường dẫn chương trình. Phiên Claude Code của app desktop nằm trong .../claude-code/<bản>/,
-    /// bản CLI cài riêng nằm ở ~/.local/share/claude/; Codex desktop nay nằm trong ChatGPT.app.
+    /// bản CLI cài riêng nằm ở ~/.local/share/claude/; Codex desktop nay nằm trong ChatGPT.app; Antigravity desktop
+    /// gồm cả máy chủ ngôn ngữ trong gói app, CLI của nó là lệnh `agy`.
     static func kind(_ path: String) -> Kind? {
         let name = (path as NSString).lastPathComponent
         if path.contains("/claude-code/") || path.contains("/.local/share/claude/") || path.contains("/@anthropic-ai/claude-code") || name == "claude" { return .claudeCLI }
@@ -446,16 +458,18 @@ final class AppUsage {
         if name == "codex" || path.contains("/codex-cli/") || path.contains("/@openai/codex") { return .codexCLI }
         if path.contains("/ChatGPT.app/") || path.contains("/Codex.app/") || path.contains("/.codex/")
             || path.contains("/Application Support/Codex/") || path.contains("/com.openai.codex/") { return .codexApp }
+        if name == "agy" { return .agCLI }
+        if path.contains("/Antigravity.app/") { return .agApp }
         return nil
     }
 
     /// % CPU tính trên cả máy (16 nhân chạy hết = 100%) giữa hai lần đọc; RAM là "bộ nhớ" như cột Memory của Activity Monitor.
-    func sample() -> (claude: Group, codex: Group, ready: Bool) {
+    func sample() -> (groups: [Group], ready: Bool) {
         let now = mach_absolute_time()
         let wallUs = UInt64(Date().timeIntervalSince1970 * 1e6)
-        var claude = Group(), codex = Group()
+        var groups = [Group](repeating: Group(), count: AppUsage.labels.count)
         let n = Int(proc_listallpids(nil, 0))
-        guard n > 0 else { return (claude, codex, false) }
+        guard n > 0 else { return (groups, false) }
         var pids = [pid_t](repeating: 0, count: n + 256)
         let got = Int(proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.stride)))
 
@@ -477,7 +491,7 @@ final class AppUsage {
             names[pid] = (st, k, (path as NSString).lastPathComponent)
             return k
         }
-        // Tiến trình thuộc về Claude/Codex nếu chính nó, hoặc gần nhất trong các đời cha, là Claude/Codex.
+        // Tiến trình thuộc về một nhóm nếu chính nó, hoặc gần nhất trong các đời cha, là app/CLI của nhóm đó.
         var memo: [pid_t: Kind?] = [:]
         func owner(_ pid: pid_t) -> Kind? {
             var chain: [pid_t] = []
@@ -510,12 +524,12 @@ final class AppUsage {
             if let p = prev[pid], p.start == st { used = total >= p.cpu ? total - p.cpu : 0 }
             else if ready && st >= prevWallUs { used = total }   // sinh ra sau lần đọc trước
             let share = ready && span > 0 ? Double(used) * tickNs / span * 100 : 0
-            var g = who.isClaude ? claude : codex
+            var g = groups[who.family]
             switch ownKind(pid) {
-            case .claudeApp?, .codexApp?:
-                g.app.cpu += share; g.app.mem += ru.ri_phys_footprint; g.app.count += 1
-            case .claudeCLI?, .codexCLI?:
+            case let k? where k.isCLI:
                 g.cli.cpu += share; g.cli.mem += ru.ri_phys_footprint; g.cli.count += 1
+            case .some:
+                g.app.cpu += share; g.app.mem += ru.ri_phys_footprint; g.app.count += 1
             case nil:
                 g.kids.cpu += share; g.kids.mem += ru.ri_phys_footprint; g.kids.count += 1
                 let name = names[pid]?.name ?? ""
@@ -523,12 +537,12 @@ final class AppUsage {
                 let h = g.heavy[key] ?? (0, 0)
                 g.heavy[key] = (h.cpu + share, h.mem + ru.ri_phys_footprint)
             }
-            if who.isClaude { claude = g } else { codex = g }
+            groups[who.family] = g
         }
         prev = next
         prevAt = now
         prevWallUs = wallUs
         names = names.filter { start[$0.key] == $0.value.start }
-        return (claude, codex, ready)
+        return (groups, ready)
     }
 }

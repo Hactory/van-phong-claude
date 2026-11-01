@@ -30,8 +30,8 @@ tắt khi thoát; số phiên đang chờ bạn hiện thành chấm đỏ trên
 Lần đầu bấm "Mở trong app", macOS hỏi quyền điều khiển Claude: chọn Cho phép.
 
 Thanh tiêu đề của app, ngang hàng 3 nút cửa sổ, có dòng tình trạng máy cập nhật mỗi 2 giây: CPU, RAM, phần
-Claude và Codex đang tốn, chỗ trống từng ổ. Phần Claude, Codex gồm cả mọi lệnh chúng chạy hộ (build, test,
-máy chủ MCP); % CPU tính trên cả máy, RAM tính như cột Bộ nhớ của Activity Monitor. Rê chuột vào dòng để xem
+Claude, Codex và Antigravity đang tốn, chỗ trống từng ổ. Mỗi nhóm gồm app desktop, CLI (`claude`, `codex`,
+`agy`) và mọi lệnh chúng chạy hộ (build, test, máy chủ MCP); % CPU tính trên cả máy, RAM tính như cột Bộ nhớ của Activity Monitor. Rê chuột vào dòng để xem
 chi tiết (lệnh nào ngốn CPU, giữ RAM nhiều nhất). Số chuyển cam, đỏ khi máy căng hoặc ổ sắp đầy. Mọi số đọc
 thẳng từ macOS, không chạy lệnh ngoài, không gửi đi đâu; cửa sổ bị thu nhỏ hoặc che khuất thì ngừng đo.
 
