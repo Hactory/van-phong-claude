@@ -515,6 +515,10 @@ body:not([data-tab="quota"]) .quota-only { display: none !important; }
 .ring span { font-size: 12px; font-weight: 800; margin-top: 2px; color: var(--ink); }
 .ring small { font-size: 11px; color: var(--muted); min-height: 14px; }
 .ring.na { color: #ccc; } .ring.na b { color: #bbb; }
+.p-codex { --tb: #1d1d1f; --tc: #fff; } .p-ag { --tb: #e3edff; --tc: #2b5fd9; }
+.avatar[class*="p-"], .team[class*="p-"] { background: var(--tb); color: var(--tc); }
+.qgroup { display: grid; grid-template-columns: 74px 1fr; align-items: center; }
+.qgroup > span { font-size: 12px; font-weight: 800; color: var(--muted); }
 .scoped { display: flex; flex-direction: column; gap: 6px; }
 .sc { display: grid; grid-template-columns: 56px 1fr 40px 54px; align-items: center; gap: 6px; font-size: 12px; }
 .sc span { font-weight: 700; } .sc b { text-align: right; } .sc small { color: var(--muted); }

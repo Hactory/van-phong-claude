@@ -902,7 +902,7 @@ function ring(label, w, maxPct) {
   const tone = pct >= maxPct ? "bad" : pct >= 50 ? "warn" : "ok";
   const reset = w.resetsAt ? `↻ ${fmtDur(w.resetsAt * 1000 - Date.now())}` : "";
   return `<div class="ring t-${tone}"><svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="26"/>
-    <circle class="val" cx="32" cy="32" r="26" stroke-dasharray="${(C * Math.min(pct, 100)) / 100} ${C}"/></svg>
+    ${pct > 0 ? `<circle class="val" cx="32" cy="32" r="26" stroke-dasharray="${(C * Math.min(pct, 100)) / 100} ${C}"/>` : ""}</svg>
     <b>${pct}%</b><span>${label}</span><small>${reset}</small></div>`;
 }
 
@@ -949,6 +949,37 @@ function poolCard(p, maxPct, opts = {}) {
   </article>`;
 }
 
+// Thẻ Codex, Antigravity: mỗi nhóm model một hàng vòng (Antigravity chia Gemini và Claude/GPT, mỗi nhóm 5 giờ + Tuần).
+const OTHER_ICON = { codex: ["CX", "codex"], antigravity: ["AG", "ag"] };
+function otherCard(c, maxPct) {
+  const [ini, cls] = OTHER_ICON[c.provider] || ["?", "khac"];
+  const old = isOld(c);
+  const hot = c.groups.filter((g) => g.windows.some((w) => w.pct >= maxPct));
+  const verdict = c.maxPct == null ? ["na", "Chưa đo được"]
+    : old ? ["na", "Số cũ"]
+    : hot.length && hot.length === c.groups.length ? ["bad", "Gần chạm trần"]
+    : hot.length ? ["warn", `Hết ${hot.map((g) => g.name).join(", ")}`]
+    : ["ok", "Dùng được"];
+  const groups = c.groups.map((g) => {
+    const rings = `<div class="rings">${g.windows.map((w) => ring(w.name, w, maxPct)).join("")}</div>`;
+    return g.name ? `<div class="qgroup"><span>${esc(g.name)}</span>${rings}</div>` : rings;
+  }).join("");
+  const plan = c.plan ? c.plan.charAt(0).toUpperCase() + c.plan.slice(1) : "";
+  const stale = c.ageSec != null && c.ageSec > 1800;
+  return `<article class="qcard${verdict[0] === "bad" ? " full" : ""}${c.maxPct == null || old ? " nodata" : ""}">
+    <header>
+      <span class="avatar p-${cls}">${ini}</span>
+      <div class="who"><b title="${esc(c.email || "")}">${esc(c.email || c.title)}</b>
+        <div><span class="team p-${cls}">${esc(c.title)}</span>${plan ? `<small class="muted"> ${esc(plan)}</small>` : ""}</div></div>
+      <span class="verdict ${verdict[0]}">${verdict[1]}</span>
+    </header>
+    ${groups || `<p class="muted">Chưa có số quota</p>`}
+    <footer>${c.extras.length ? `<div class="locs">${c.extras.map((x) => `<span class="loc">${esc(x)}</span>`).join("")}</div>` : ""}
+      <small class="${stale ? "stale" : "muted"}">${c.ageSec == null ? "chưa đo" : `đo ${fmtDur(c.ageSec * 1000)} trước${stale ? " (cũ)" : ""}`} · ${esc(c.source || "")}</small>
+      ${c.status ? `<small class="muted note">${esc(c.status)}</small>` : ""}</footer>
+  </article>`;
+}
+
 const isOld = (p) => p.ageSec != null && p.ageSec > 3 * 3600;
 const coreMax = (p) => Math.max(p.fiveHour?.pct ?? -1, p.sevenDay?.pct ?? -1);
 
@@ -979,10 +1010,12 @@ function renderQuota() {
     <div class="qgrid">${kho.sort(byPct).map((p) => poolCard(p, maxPct)).join("")}</div>
     <h3 class="qh">🖥 Đăng nhập trong app <small>từng bản app Claude · ${inApp.length} nick${idle.length ? ` · ${esc(idle.join(", "))} chưa đăng nhập` : ""} · 🗄 = có cả trong kho</small></h3>
     <div class="qgrid">${inApp.map((p) => poolCard(p, maxPct, { markKho: true })).join("")}</div>
+    ${(quota.others || []).length ? `<h3 class="qh">🧩 Codex và Antigravity <small>quota riêng của OpenAI, Google · tối đa 10 phút hỏi một lần, bấm Làm mới để hỏi ngay</small></h3>
+    <div class="qgrid">${quota.others.map((c) => otherCard(c, maxPct)).join("")}</div>` : ""}
     ${cliOnly.length ? `<h3 class="qh">⌨️ Chỉ đăng nhập ở lane CLI <small>${cliOnly.length} túi</small></h3>
     <div class="qgrid">${cliOnly.sort(byPct).map((p) => poolCard(p, maxPct)).join("")}</div>` : ""}
     ${quota.errors && quota.errors.length ? `<p class="err">${esc(quota.errors.join(" · "))}</p>` : ""}
-    <p class="muted qfoot">Số của kho do claude-swap lưu, có thể cũ vài tới ~20 phút. Túi đang có phiên mở trong app thì hỏi thẳng Anthropic, mỗi túi tối đa 10 phút một lần; túi không có phiên nào mở chỉ còn số app ghi lần cuối.</p>`;
+    <p class="muted qfoot">Số của kho do claude-swap lưu, có thể cũ vài tới ~20 phút. Túi đang có phiên mở trong app thì hỏi thẳng Anthropic, mỗi túi tối đa 10 phút một lần; túi không có phiên nào mở chỉ còn số app ghi lần cuối. Codex hỏi qua chính lệnh <code>codex</code>; Antigravity đọc từ app đang mở, app đóng thì hỏi lệnh <code>agy</code>.</p>`;
 }
 
 document.addEventListener("click", (e) => {

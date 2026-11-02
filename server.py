@@ -1757,13 +1757,16 @@ def collect_script():
     return p if os.path.isfile(p) else None
 
 
-def refresh_quota():
+def refresh_quota(force=False):
     script = collect_script()
     if not script:
         return {"error": "Không thấy bộ gom quota collect.py"}
     py = CSWAP_PY if os.path.isfile(CSWAP_PY) else "python3"
     try:
-        r = subprocess.run([py, "-I", script, "--fresh-sec", "600"], capture_output=True, text=True, timeout=120)
+        # Bấm "Làm mới" thì hỏi lại Codex, Antigravity ngay (rẻ, chỉ hỏi khi người dùng bấm); túi Claude vẫn
+        # giữ nhịp 10 phút vì hạn mức hỏi quota của Anthropic tính chung cả tài khoản.
+        r = subprocess.run([py, "-I", script, "--fresh-sec", "600", "--fresh-other", "0" if force else "600"],
+                           capture_output=True, text=True, timeout=150)
         data = json.loads(r.stdout)
     except (subprocess.TimeoutExpired, ValueError) as e:
         return {"error": f"Bộ gom quota lỗi: {type(e).__name__}"}
@@ -1780,7 +1783,7 @@ def get_quota(force=False):
     with _quota_lock:
         if _quota["data"] is not None and not force and time.time() - _quota["at"] < 60:
             return _quota["data"]
-    data = refresh_quota()
+    data = refresh_quota(force)
     with _quota_lock:
         _quota.update(at=time.time(), data=data)
     return data

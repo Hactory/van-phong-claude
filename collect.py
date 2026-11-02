@@ -20,14 +20,29 @@ mọi nguồn:
                          trường; túi nào chưa có số mới thì hỏi Anthropic bằng token đó.
                          CHỈ ĐỌC, không làm mới, không in, không ghi ra đâu.
 
+Thêm hai thẻ quota ngoài Claude (mỗi thẻ hỏi tối đa --fresh-other giây một lần):
+
+  5. Codex   — hỏi `codex app-server` (giao thức JSON-RPC của chính Codex: account/read,
+               account/rateLimits/read); Codex tự gọi OpenAI bằng đăng nhập của nó. Không chạy
+               được thì lấy số Codex ghi lần cuối trong nhật ký phiên ($CODEX_HOME/sessions).
+  6. Antigravity — máy chủ cục bộ của app Antigravity đang mở (RetrieveUserQuotaSummary,
+               GetUserStatus; mã CSRF đọc từ tham số tiến trình, chỉ giữ trong bộ nhớ). App
+               đóng thì chạy `agy -p /usage --output-format json` (báo cáo quota, không gửi lời
+               nhắc nào cho model).
+
 Không gọi model nào, không tốn token LLM.
 """
 import argparse
 import glob
 import json
 import os
+import re
+import select
+import shutil
+import ssl
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 
@@ -425,15 +440,313 @@ def collect_app_sessions(fresh_sec):
     save_cache(cache)
 
 
+# ---------- 5, 6. Codex và Antigravity ----------
+others = []         # thẻ quota ngoài Claude, cùng dạng: groups[].windows[] (pct = % ĐÃ DÙNG)
+
+
+def find_cli(name, extra):
+    """Lệnh `name`: khai trong cấu hình (khoá trùng tên lệnh), PATH, rồi các chỗ cài quen thuộc.
+    App mở máy chủ với PATH tối giản của macOS nên PATH thường không có ~/.local/bin."""
+    for c in [CONFIG.get(name), shutil.which(name)] + extra:
+        c = os.path.expanduser(c) if c else None
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def window_name(mins=None, key=""):
+    key = str(key).lower()
+    if mins == 300 or key in ("5h", "session"):
+        return "5 giờ"
+    if mins == 10080 or key in ("weekly", "week"):
+        return "Tuần"
+    if mins == 43200 or key in ("monthly", "month"):
+        return "Tháng"
+    return f"{round(mins / 60)} giờ" if mins else (key or "?")
+
+
+def codex_rpc(codex):
+    """(account, rateLimits, lỗi) từ `codex app-server`. Đọc thô từ ống để không kẹt vì bộ đệm dòng."""
+    try:
+        p = subprocess.Popen([codex, "-s", "read-only", "-a", "never", "app-server"], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=tempfile.gettempdir())
+    except OSError as e:
+        return None, None, f"không chạy được codex ({type(e).__name__})"
+    fd, buf, end = p.stdout.fileno(), [b""], time.time() + 25
+
+    def send(o):
+        p.stdin.write((json.dumps(o) + "\n").encode())
+        p.stdin.flush()
+
+    def wait(want):
+        while time.time() < end:
+            while b"\n" in buf[0]:
+                line, buf[0] = buf[0].split(b"\n", 1)
+                try:
+                    m = json.loads(line)
+                except ValueError:
+                    continue
+                if m.get("id") == want:
+                    return m
+            if select.select([fd], [], [], 0.5)[0]:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    return None
+                buf[0] += chunk
+        return None
+    try:
+        send({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "van-phong-claude", "version": "1"}}})
+        if not wait(1):
+            return None, None, "codex app-server không trả lời"
+        send({"method": "initialized"})
+        send({"id": 2, "method": "account/read", "params": {}})
+        acc = wait(2) or {}
+        send({"id": 3, "method": "account/rateLimits/read"})
+        lim = wait(3) or {}
+    except (OSError, ValueError) as e:
+        return None, None, f"codex app-server lỗi ({type(e).__name__})"
+    finally:
+        try:
+            p.stdin.close()
+        except OSError:
+            pass
+        p.terminate()
+        try:
+            p.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            p.kill()
+    if lim.get("error") or not lim.get("result"):
+        why = (lim.get("error") or {}).get("message") or "không đọc được giới hạn"
+        return (acc.get("result") or {}).get("account"), None, f"codex: {why[:120]}"
+    return (acc.get("result") or {}).get("account"), lim["result"], ""
+
+
+def codex_windows(lim, name_key="windowDurationMins", pct_key="usedPercent", reset_key="resetsAt"):
+    out = []
+    for k in ("primary", "secondary"):
+        w = (lim or {}).get(k)
+        if w and w.get(pct_key) is not None:
+            out.append({"name": window_name(w.get(name_key)), "pct": float(w[pct_key]), "resetsAt": w.get(reset_key)})
+    return out
+
+
+def codex_from_sessions(home):
+    """Số Codex ghi lần cuối trong nhật ký phiên (sự kiện token_count), kèm giờ ghi."""
+    files = sorted(glob.glob(os.path.join(home, "sessions", "*", "*", "*", "rollout-*.jsonl")),
+                   key=lambda f: os.path.getmtime(f), reverse=True)[:5]
+    for f in files:
+        try:
+            with open(f, "rb") as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - 400_000))
+                tail = fh.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        for line in reversed(tail.splitlines()):
+            if '"rate_limits"' not in line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            rl = (ev.get("payload") or {}).get("rate_limits") or {}
+            wins = codex_windows(rl, "window_minutes", "used_percent", "resets_at")
+            if wins:
+                return {"groups": [{"name": "", "windows": wins}], "plan": rl.get("plan_type") or "",
+                        "updatedAt": iso_to_epoch(ev.get("timestamp")) or os.path.getmtime(f)}
+    return None
+
+
+def collect_codex():
+    home = os.environ.get("CODEX_HOME") or os.path.join(HOME, ".codex")
+    codex = find_cli("codex", [os.path.join(HOME, ".local", "bin", "codex"), "/opt/homebrew/bin/codex",
+                               "/usr/local/bin/codex", "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+                               "/Applications/Codex.app/Contents/Resources/codex"])
+    if not codex and not os.path.isdir(home):
+        return None
+    card = {"provider": "codex", "title": "Codex", "email": "", "plan": "", "groups": [], "extras": [],
+            "source": "", "updatedAt": None, "status": ""}
+    acc, lim, why = codex_rpc(codex) if codex else (None, None, "không thấy lệnh codex")
+    if acc:
+        card["email"] = acc.get("email") or ""
+        card["plan"] = acc.get("planType") or ""
+    if lim:
+        rl = lim.get("rateLimits") or {}
+        card["plan"] = rl.get("planType") or card["plan"]
+        groups = [{"name": "", "windows": codex_windows(rl)}]
+        # Giới hạn riêng từng model (vd. bản Spark) nằm cạnh giới hạn chung.
+        for lid, v in (lim.get("rateLimitsByLimitId") or {}).items():
+            if lid != rl.get("limitId") and codex_windows(v):
+                groups.append({"name": v.get("limitName") or lid, "windows": codex_windows(v)})
+        card["groups"] = [g for g in groups if g["windows"]]
+        cr = rl.get("credits") or {}
+        if cr.get("unlimited"):
+            card["extras"].append("Credits không giới hạn")
+        elif cr.get("hasCredits") and cr.get("balance"):
+            card["extras"].append(f"Credits còn {float(cr['balance']):,.0f}".replace(",", "."))
+        n = (lim.get("rateLimitResetCredits") or {}).get("availableCount")
+        if n:
+            card["extras"].append(f"{n} lượt reset quota miễn phí")
+        if rl.get("rateLimitReachedType"):
+            card["status"] = "Codex báo đang chạm giới hạn"
+        card.update(source="codex app-server", updatedAt=NOW)
+    else:
+        old = codex_from_sessions(home)
+        if old:
+            card.update(groups=old["groups"], plan=card["plan"] or old["plan"], updatedAt=old["updatedAt"],
+                        source="nhật ký phiên Codex")
+        card["status"] = why
+    return card if card["groups"] or card["email"] else None
+
+
+def ag_call(port, tok, method):
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False            # máy chủ cục bộ dùng chứng chỉ tự ký, chỉ nghe ở 127.0.0.1
+    ctx.verify_mode = ssl.CERT_NONE
+    import urllib.request
+    body = json.dumps({"metadata": {"ideName": "antigravity", "extensionName": "antigravity",
+                                    "locale": "en", "ideVersion": "unknown"}}).encode()
+    req = urllib.request.Request(f"https://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/{method}",
+                                 data=body, headers={"Content-Type": "application/json", "Connect-Protocol-Version": "1",
+                                                     "X-Codeium-Csrf-Token": tok})
+    try:
+        with urllib.request.urlopen(req, timeout=6, context=ctx) as r:
+            return json.loads(r.read().decode())
+    except Exception:
+        return None
+
+
+def ag_from_app():
+    """(summary, userStatus) từ máy chủ ngôn ngữ của app Antigravity đang mở, hoặc (None, None)."""
+    try:
+        out = subprocess.run(["ps", "-axww", "-o", "pid=,args="], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None, None
+    for line in out.splitlines():
+        if "/Antigravity.app/" not in line or "language_server" not in line or "--csrf_token" not in line:
+            continue
+        a = line.split()
+        i = a.index("--csrf_token")
+        if i + 1 >= len(a):
+            continue
+        pid, tok = a[0], a[i + 1]
+        try:
+            lo = subprocess.run(["/usr/sbin/lsof", "-nP", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN"],
+                                capture_output=True, text=True, timeout=5).stdout
+        except Exception:
+            continue
+        for port in re.findall(r"127\.0\.0\.1:(\d+) \(LISTEN\)", lo):
+            summary = ag_call(port, tok, "RetrieveUserQuotaSummary")
+            if summary:
+                return summary.get("response") or summary, (ag_call(port, tok, "GetUserStatus") or {}).get("userStatus") or {}
+    return None, None
+
+
+def ag_from_cli(agy):
+    """Báo cáo quota của `agy -p /usage` trong thư mục tạm; chặn mở trình duyệt nếu agy đòi đăng nhập lại."""
+    with tempfile.TemporaryDirectory(prefix="van-phong-agy-") as tmp:
+        stub = os.path.join(tmp, "open")
+        with open(stub, "w") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        os.chmod(stub, 0o755)
+        env = dict(os.environ, AGY_CLI_DISABLE_AUTO_UPDATE="true", BROWSER=stub,
+                   PATH=tmp + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"))
+        try:
+            p = subprocess.Popen([agy, "-p", "/usage", "--output-format", "json"], cwd=tmp, env=env,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+            try:
+                out, _ = p.communicate(timeout=60)
+            finally:
+                try:
+                    os.killpg(p.pid, 15)     # dọn mọi tiến trình con agy kịp mở (máy chủ MCP…)
+                except OSError:
+                    pass
+            d = json.loads(out.decode() or "{}")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+            return None, f"agy không trả báo cáo quota ({type(e).__name__})"
+    data = ((d.get("command") or {}).get("data")) or {}
+    if d.get("status") != "SUCCESS" or not data.get("groups"):
+        return None, "agy chưa đăng nhập hoặc không trả báo cáo quota"
+    return {"groups": [{"displayName": g.get("name"), "buckets": [
+        {"window": b.get("window"), "bucketId": b.get("id"), "remainingFraction": b.get("remaining_fraction"),
+         "resetTime": b.get("reset_time")} for b in g.get("buckets") or []]} for g in data["groups"]]}, ""
+
+
+def ag_groups(summary):
+    groups = []
+    for g in summary.get("groups") or []:
+        name = re.sub(r"\s+models?$", "", g.get("displayName") or "", flags=re.I).replace(" and ", "/")
+        wins = []
+        for b in g.get("buckets") or []:
+            frac = b.get("remainingFraction")
+            if frac is None:
+                continue
+            reset = b.get("resetTime")
+            wins.append({"name": window_name(key=b.get("window") or b.get("bucketId", "").split("-")[-1]),
+                         "pct": round((1 - float(frac)) * 100, 1),
+                         "resetsAt": iso_to_epoch(reset) if isinstance(reset, str) else reset})
+        wins.sort(key=lambda w: w["name"] != "5 giờ")
+        if wins:
+            groups.append({"name": name, "windows": wins})
+    return groups
+
+
+def collect_antigravity():
+    agy = find_cli("agy", [os.path.join(HOME, ".local", "bin", "agy"), "/opt/homebrew/bin/agy", "/usr/local/bin/agy"])
+    card = {"provider": "antigravity", "title": "Antigravity", "email": "", "plan": "", "groups": [], "extras": [],
+            "source": "", "updatedAt": None, "status": ""}
+    summary, user = ag_from_app()
+    if summary:
+        card.update(source="app Antigravity", email=user.get("email") or "",
+                    plan=(user.get("userTier") or {}).get("name")
+                    or ((user.get("planStatus") or {}).get("planInfo") or {}).get("planName") or "")
+    elif agy:
+        summary, why = ag_from_cli(agy)
+        card.update(source="agy CLI", status=why)
+    elif not os.path.isdir("/Applications/Antigravity.app"):
+        return None
+    else:
+        card["status"] = "app Antigravity đang đóng và không thấy lệnh agy"
+    if summary:
+        card.update(groups=ag_groups(summary), updatedAt=NOW)
+    return card
+
+
+def collect_others(fresh_sec):
+    """Codex và Antigravity: dùng số đã đệm nếu chưa quá fresh_sec giây, không thì hỏi lại."""
+    cache = load_cache()
+    for key, fn in (("codex", collect_codex), ("antigravity", collect_antigravity)):
+        c = cache.get(key) or {}
+        card = c.get("card") if NOW - (c.get("at") or 0) < fresh_sec else None
+        if card is None:
+            card = fn()
+            if card and card.get("groups"):
+                cache[key] = {"at": NOW, "card": card}
+            elif card and (c.get("card") or {}).get("groups"):
+                # Hỏi lần này hỏng: giữ số cũ, kèm lý do.
+                card = dict(c["card"], status=card.get("status") or "lần hỏi mới nhất không được")
+        if card:
+            others.append(card)
+    save_cache(cache)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fresh-sec", type=int, default=1800,
                     help="túi đã có số mới hơn ngần này giây thì khỏi hỏi Anthropic qua lane CLI")
+    ap.add_argument("--fresh-other", type=int, default=600,
+                    help="số quota Codex, Antigravity mới hơn ngần này giây thì khỏi hỏi lại")
     args = ap.parse_args()
     collect_kho()
     collect_apps()
     collect_app_sessions(args.fresh_sec)
     collect_lanes(args.fresh_sec)
+    collect_others(args.fresh_other)
+    for c in others:
+        c["ageSec"] = None if c["updatedAt"] is None else max(0, int(NOW - c["updatedAt"]))
+        vals = [w["pct"] for g in c["groups"] for w in g["windows"]]
+        c["maxPct"] = max(vals) if vals else None
     out = []
     for p in pools.values():
         if not p["orgName"]:
@@ -445,7 +758,7 @@ def main():
         out.append(p)
     out.sort(key=lambda p: (not p["inKho"], p["email"], p["orgName"]))
     json.dump({"generatedAt": NOW, "maxPct": float(os.environ.get("KHO_MAX_PCT", "80")),
-               "pools": out, "appsIdle": apps_idle, "errors": errors}, sys.stdout, ensure_ascii=False)
+               "pools": out, "others": others, "appsIdle": apps_idle, "errors": errors}, sys.stdout, ensure_ascii=False)
 
 
 if __name__ == "__main__":

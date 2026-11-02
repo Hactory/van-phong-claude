@@ -96,6 +96,12 @@ có vòng 5 giờ và Tuần kèm giờ hồi, thanh quota theo model, độ tu�
 được hỏi Anthropic bằng token của chính phiên đó (chỉ đọc trong bộ nhớ, không in, không lưu), tối đa 10
 phút một lần; cần cài claude-swap.
 
+Nhóm **Codex và Antigravity** có một thẻ cho mỗi dịch vụ, mỗi nhóm model một hàng vòng 5 giờ và Tuần.
+Codex hỏi qua chính lệnh `codex` (`codex app-server`, chỉ đọc, Codex tự gọi OpenAI bằng đăng nhập của
+nó); hỏng thì lấy số Codex ghi lần cuối trong `~/.codex/sessions`. Antigravity đọc từ máy chủ nội bộ của
+app đang mở (chỉ `127.0.0.1`); app đóng thì chạy `agy -p /usage` (không gọi model, không tốn token, không
+mở trình duyệt). Tối đa 10 phút một lần, "↻ Làm mới" hỏi lại ngay.
+
 ## Cấu hình
 
 Mọi thứ riêng của máy nằm ở `~/.claude/van-phong/cau-hinh.json`, không nằm trong repo. Mọi khoá đều tuỳ
@@ -111,7 +117,7 @@ chọn; mẫu ở [`cau-hinh.mau.json`](cau-hinh.mau.json).
 | `quyenTraLoi` | `--permission-mode` khi chạy tiếp phiên đã đóng (mặc định `default`) |
 | `mauTeam` | màu chip theo tên tổ chức: `tim`, `cam`, `xanh`, `hong`, `vang`, `canhan` |
 | `boQuaLane` | thư mục `~/.claude-*` không phải nơi đăng nhập CLI thật |
-| `claude` | đường dẫn lệnh `claude` nếu không nằm trên PATH |
+| `claude`, `codex`, `agy` | đường dẫn từng lệnh nếu không nằm trên PATH |
 | `oDia` | danh sách thư mục của các ổ hiện trên thanh tiêu đề (mặc định: ổ máy và các ổ gắn ngoài ghi được, bỏ Time Machine, Recovery) |
 
 Nhiều bản app chạy song song: mỗi bản là Claude.app chạy với `--user-data-dir=~/Library/Application
@@ -125,7 +131,8 @@ Support/Claude-NN`; văn phòng nhận bản theo đúng thư mục đó.
   `~/.claude/van-phong/` (đánh dấu, màn hình đã lưu, đệm tóm tắt, tên tổ chức, log) và
   `~/.cache/claude-quota/live.json` (chỉ số %).
 - Không gửi gì ra ngoài, trừ: bộ tóm tắt bạn tự khai, lượt hỏi quota tới `api.anthropic.com` của tab
-  Quota (cần claude-swap), và lượt đọc danh sách Dự án tới `api.anthropic.com` (chỉ đọc).
+  Quota (cần claude-swap), lượt hỏi quota Codex và Antigravity (do chính Codex và Antigravity gửi tới OpenAI,
+  Google), và lượt đọc danh sách Dự án tới `api.anthropic.com` (chỉ đọc).
 
 ## Ảnh
 
