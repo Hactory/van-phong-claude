@@ -96,11 +96,17 @@ có vòng 5 giờ và Tuần kèm giờ hồi, thanh quota theo model, độ tu�
 được hỏi Anthropic bằng token của chính phiên đó (chỉ đọc trong bộ nhớ, không in, không lưu), tối đa 10
 phút một lần; cần cài claude-swap.
 
-Nhóm **Codex và Antigravity** có một thẻ cho mỗi dịch vụ, mỗi nhóm model một hàng vòng 5 giờ và Tuần.
-Codex hỏi qua chính lệnh `codex` (`codex app-server`, chỉ đọc, Codex tự gọi OpenAI bằng đăng nhập của
-nó); hỏng thì lấy số Codex ghi lần cuối trong `~/.codex/sessions`. Antigravity đọc từ máy chủ nội bộ của
-app đang mở (chỉ `127.0.0.1`); app đóng thì chạy `agy -p /usage` (không gọi model, không tốn token, không
-mở trình duyệt). Tối đa 10 phút một lần, "↻ Làm mới" hỏi lại ngay.
+Nút lọc **Tất cả · Claude · Codex · AGY** ở đầu tab (kèm số thẻ) chỉ hiện phần của một nhà cung cấp; lựa
+chọn được nhớ trong trình duyệt của máy đó.
+
+Phần **Codex** có thẻ đăng nhập gốc (`~/.codex`, app Codex và lệnh `codex` gõ tay) và, nếu có lệnh
+`codex-kho` (kho nhiều nick Codex của cc-orchestrator), mỗi nick trong kho một thẻ kèm nick sẽ chạy lượt
+sau. Phần **AGY** là Antigravity. Mỗi nhóm model một hàng vòng 5 giờ và Tuần. Codex hỏi qua chính lệnh
+`codex` (`codex app-server`, chỉ đọc, Codex tự gọi OpenAI bằng đăng nhập của nó); kho Codex hỏi qua
+`codex-kho quota` theo cùng cách. Không hỏi được thì lấy số Codex ghi lần cuối trong `~/.codex/sessions`
+(bỏ cách này khi có kho, vì kho dùng chung thư mục đó). Antigravity đọc từ máy chủ nội bộ của app đang mở
+(chỉ `127.0.0.1`); app đóng thì chạy `agy -p /usage` (không gọi model, không tốn token, không mở trình
+duyệt). Tối đa 10 phút một lần, "↻ Làm mới" hỏi lại ngay.
 
 ## Cấu hình
 

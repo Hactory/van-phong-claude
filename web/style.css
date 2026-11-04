@@ -492,6 +492,10 @@ body:not([data-tab="quota"]) .quota-only { display: none !important; }
 .qbig span { font-weight: 700; font-size: 14px; } .qbig small { color: var(--muted); font-weight: 500; }
 .qbest { flex: 1; font-size: 14px; } .qbest small { color: var(--muted); margin-left: 6px; }
 .qtools { display: flex; align-items: center; gap: 10px; } .qtools small { color: var(--muted); }
+.qfilter { flex-basis: 100%; }
+.qfilter .fchip.on { background: #ffd66b; color: var(--ink); }
+.qfilter small { font-weight: 600; opacity: .7; }
+.qprov { display: flex; align-items: center; gap: 14px; flex: 1 1 360px; flex-wrap: wrap; }
 .qh { margin: 18px 0 10px; font-size: 17px; } .qh small { font-weight: 500; color: var(--muted); font-size: 13px; }
 .qgrid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 310px), 1fr)); }
 .qcard {

@@ -955,7 +955,9 @@ function otherCard(c, maxPct) {
   const [ini, cls] = OTHER_ICON[c.provider] || ["?", "khac"];
   const old = isOld(c);
   const hot = c.groups.filter((g) => g.windows.some((w) => w.pct >= maxPct));
-  const verdict = c.maxPct == null ? ["na", "Chưa đo được"]
+  // Thẻ của kho Codex có lý do (chạm ngưỡng, chạm hạn mức, mất đăng nhập) = codex-kho đang né nick đó.
+  const verdict = c.kho && c.status ? ["bad", "Tạm gác"]
+    : c.maxPct == null ? ["na", "Chưa đo được"]
     : old ? ["na", "Số cũ"]
     : hot.length && hot.length === c.groups.length ? ["bad", "Gần chạm trần"]
     : hot.length ? ["warn", `Hết ${hot.map((g) => g.name).join(", ")}`]
@@ -997,31 +999,74 @@ function renderQuota() {
   const fableOk = (p) => !p.scoped.some((x) => x.pct >= maxPct);
   const best = usable.slice().sort((a, b) => (fableOk(b) - fableOk(a)) || ((a.fiveHour?.pct ?? 0) - (b.fiveHour?.pct ?? 0)))[0];
   const byPct = (a, b) => (b.maxPct ?? -1) - (a.maxPct ?? -1);
-  $("#quota").innerHTML = `
-    <div class="qsum">
-      <div class="qbig"><b>${usable.length + unknown.length}/${kho.length}</b><span>nick trong kho dùng được<br>
+  const others = quota.others || [], cxKho = quota.codexKho || [];
+  const cxMain = others.filter((c) => c.provider === "codex"), ag = others.filter((c) => c.provider === "antigravity");
+  const count = { all: quota.pools.length + cxKho.length + cxMain.length + ag.length, claude: quota.pools.length,
+    codex: cxKho.length + cxMain.length, agy: ag.length };
+  const show = (k) => qFilter === "all" || qFilter === k;
+  const cxUsable = cxKho.filter((c) => !c.status && !isOld(c) && (c.maxPct ?? 0) < maxPct);
+  const cxPick = cxKho.find((c) => c.pick);
+  const agOk = ag.filter((c) => c.groups.some((g) => g.windows.every((w) => w.pct < maxPct)));
+  const agLine = ag.flatMap((c) => c.groups.map((g) => `${g.name || "Chung"} ${Math.round(Math.max(...g.windows.map((w) => w.pct)))}%`)).join(" · ");
+  const sums = [], secs = [], foot = [];
+  if (show("claude")) {
+    sums.push(`<div class="qprov"><div class="qbig"><b>${usable.length + unknown.length}/${kho.length}</b><span>nick kho Claude dùng được<br>
         <small>${usable.length} có số, 5 giờ và Tuần dưới ${maxPct}%${unknown.length ? ` · ${unknown.length} chưa đo được số nhưng vẫn dùng bình thường` : ""}</small></span></div>
       ${best ? `<div class="qbest">Nên dùng tiếp: <b>${esc(best.email)}</b> <span class="team t-${teamKey(best.team)}">${esc(best.team)}</span>
-        <small>5 giờ ${Math.round(best.fiveHour?.pct ?? 0)}%</small></div>` : ""}
-      <div class="qtools"><small>Gom lúc ${new Date(quota.generatedAt * 1000).toLocaleTimeString("vi-VN")}</small>
-        <button class="btn" id="q-refresh">↻ Làm mới</button></div>
-    </div>
-    <h3 class="qh">🗄 Kho nick <small>claude-swap · ${kho.length} túi</small></h3>
+        <small>5 giờ ${Math.round(best.fiveHour?.pct ?? 0)}%</small></div>` : ""}</div>`);
+    secs.push(`<h3 class="qh">🗄 Kho nick Claude <small>claude-swap · ${kho.length} túi</small></h3>
     <div class="qgrid">${kho.sort(byPct).map((p) => poolCard(p, maxPct)).join("")}</div>
     <h3 class="qh">🖥 Đăng nhập trong app <small>từng bản app Claude · ${inApp.length} nick${idle.length ? ` · ${esc(idle.join(", "))} chưa đăng nhập` : ""} · 🗄 = có cả trong kho</small></h3>
     <div class="qgrid">${inApp.map((p) => poolCard(p, maxPct, { markKho: true })).join("")}</div>
-    ${(quota.others || []).length ? `<h3 class="qh">🧩 Codex và Antigravity <small>quota riêng của OpenAI, Google · tối đa 10 phút hỏi một lần, bấm Làm mới để hỏi ngay</small></h3>
-    <div class="qgrid">${quota.others.map((c) => otherCard(c, maxPct)).join("")}</div>` : ""}
     ${cliOnly.length ? `<h3 class="qh">⌨️ Chỉ đăng nhập ở lane CLI <small>${cliOnly.length} túi</small></h3>
-    <div class="qgrid">${cliOnly.sort(byPct).map((p) => poolCard(p, maxPct)).join("")}</div>` : ""}
-    ${quota.errors && quota.errors.length ? `<p class="err">${esc(quota.errors.join(" · "))}</p>` : ""}
-    <p class="muted qfoot">Số của kho do claude-swap lưu, có thể cũ vài tới ~20 phút. Túi đang có phiên mở trong app thì hỏi thẳng Anthropic, mỗi túi tối đa 10 phút một lần; túi không có phiên nào mở chỉ còn số app ghi lần cuối. Codex hỏi qua chính lệnh <code>codex</code>; Antigravity đọc từ app đang mở, app đóng thì hỏi lệnh <code>agy</code>.</p>`;
+    <div class="qgrid">${cliOnly.sort(byPct).map((p) => poolCard(p, maxPct)).join("")}</div>` : ""}`);
+    foot.push("Số của kho Claude do claude-swap lưu, có thể cũ vài tới ~20 phút. Túi đang có phiên mở trong app thì hỏi thẳng Anthropic, mỗi túi tối đa 10 phút một lần; túi không có phiên nào mở chỉ còn số app ghi lần cuối.");
+  }
+  if (show("codex")) {
+    if (cxKho.length) sums.push(`<div class="qprov"><div class="qbig"><b>${cxUsable.length}/${cxKho.length}</b><span>nick kho Codex dùng được<br>
+        <small>mọi cửa sổ dưới ${maxPct}%, lượt gọi Codex tự chạy luân phiên</small></span></div>
+      ${cxPick ? `<div class="qbest">Lượt sau: <b>${esc(cxPick.email)}</b> <span class="team p-codex">${esc(cxPick.title)}</span></div>` : ""}</div>`);
+    if (cxKho.length) secs.push(`<h3 class="qh">🗄 Kho nick Codex <small>codex-kho · ${cxKho.length} nick · mỗi nick một workspace</small></h3>
+    <div class="qgrid">${cxKho.map((c) => otherCard(c, maxPct)).join("")}</div>`);
+    if (cxMain.length) secs.push(`<h3 class="qh">🖥 Codex đăng nhập gốc <small>~/.codex · app Codex và lệnh <code>codex</code> gõ tay</small></h3>
+    <div class="qgrid">${cxMain.map((c) => otherCard(c, maxPct)).join("")}</div>`);
+    if (count.codex) foot.push("Codex hỏi qua chính lệnh <code>codex</code> (app-server, không gọi model), tối đa 10 phút một lần; kho Codex còn tự ghi số sau mỗi lượt chạy.");
+  }
+  if (show("agy") && ag.length) {
+    sums.push(`<div class="qprov"><div class="qbig"><b>${agOk.length}/${ag.length}</b><span>Antigravity dùng được<br>
+        <small>${esc(agLine)} (cửa sổ căng nhất)</small></span></div></div>`);
+    secs.push(`<h3 class="qh">🪐 Antigravity <small>app Antigravity và lệnh <code>agy</code></small></h3>
+    <div class="qgrid">${ag.map((c) => otherCard(c, maxPct)).join("")}</div>`);
+    foot.push("Antigravity đọc từ app đang mở, app đóng thì hỏi lệnh <code>agy</code>.");
+  }
+  if (!secs.length) secs.push(`<p class="muted">Chưa có nick nào ở mục này.</p>`);
+  $("#quota").innerHTML = `
+    <div class="qsum">
+      <div class="qfilter fgroup" role="group" aria-label="Lọc theo nhà cung cấp">${Q_FILTERS.map(([k, label]) =>
+        `<button class="fchip${qFilter === k ? " on" : ""}" data-qf="${k}">${label} <small>${count[k]}</small></button>`).join("")}</div>
+      ${sums.join("")}
+      <div class="qtools"><small>Gom lúc ${new Date(quota.generatedAt * 1000).toLocaleTimeString("vi-VN")}</small>
+        <button class="btn" id="q-refresh">↻ Làm mới</button></div>
+    </div>
+    ${secs.join("")}
+    ${quota.errors && quota.errors.length && show("claude") ? `<p class="err">${esc(quota.errors.join(" · "))}</p>` : ""}
+    <p class="muted qfoot">${foot.join(" ")}</p>`;
 }
+
+// Lọc tab Quota theo nhà cung cấp; nhớ lựa chọn trên máy này (bộ nhớ trình duyệt lỗi thì về "Tất cả").
+const Q_FILTERS = [["all", "Tất cả"], ["claude", "Claude"], ["codex", "Codex"], ["agy", "AGY"]];
+let qFilter = (() => { try { return localStorage.getItem("vp-quota-filter") || "all"; } catch { return "all"; } })();
 
 document.addEventListener("click", (e) => {
   const t = e.target.closest(".tabs button")?.dataset.tab;
   if (t) setTab(t);
   if (e.target.id === "q-refresh") loadQuota(true);
+  const qf = e.target.closest("[data-qf]")?.dataset.qf;
+  if (qf) {
+    qFilter = qf;
+    try { localStorage.setItem("vp-quota-filter", qf); } catch { /* chỉ là tiện ích, không lưu được thì thôi */ }
+    renderQuota();
+  }
 });
 setInterval(() => { if (tab === "quota" && !document.hidden) loadQuota(false); }, 60000);
 

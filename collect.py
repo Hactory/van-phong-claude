@@ -591,7 +591,8 @@ def collect_codex():
             card["status"] = "Codex báo đang chạm giới hạn"
         card.update(source="codex app-server", updatedAt=NOW)
     else:
-        old = codex_from_sessions(home)
+        # Kho nick Codex dùng chung thư mục phiên với ~/.codex: số trong nhật ký có thể là của nick kho.
+        old = None if kho_nicks_exist() else codex_from_sessions(home)
         if old:
             card.update(groups=old["groups"], plan=card["plan"] or old["plan"], updatedAt=old["updatedAt"],
                         source="nhật ký phiên Codex")
@@ -713,6 +714,45 @@ def collect_antigravity():
     return card
 
 
+def kho_nicks_exist():
+    d = os.path.join(HOME, ".codex-kho", "nicks")
+    return os.path.isdir(d) and any(x.isdigit() for x in os.listdir(d))
+
+
+def collect_codex_kho(fresh_sec):
+    """Kho nhiều nick Codex (lệnh `codex-kho`): mỗi nick một thẻ. Chỉ đọc số kho đã lưu; có nick cũ
+    quá fresh_sec giây thì nhờ `codex-kho quota` hỏi lại (qua codex app-server, không gọi model)."""
+    kho = find_cli("codex-kho", [os.path.join(HOME, ".local", "bin", "codex-kho"),
+                                 os.path.join(HOME, "cc-orchestrator", "scripts", "codex-kho")])
+    if not kho:
+        return []
+
+    def read(cmd, timeout):
+        try:
+            r = subprocess.run([kho] + cmd, capture_output=True, text=True, timeout=timeout,
+                               cwd=tempfile.gettempdir())
+            return json.loads(r.stdout or "{}")
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return None
+    data = read(["list", "--json"], 20)
+    if not data or not data.get("nicks"):
+        return []
+    if any(NOW - (n.get("updatedAt") or 0) >= fresh_sec for n in data["nicks"]):
+        data = read(["quota", "--json"], 90) or data
+    cards = []
+    for n in data["nicks"]:
+        wins = [{"name": window_name(w.get("mins")), "pct": float(w["pct"]), "resetsAt": w.get("resetsAt")}
+                for w in sorted(n.get("windows") or [], key=lambda w: w.get("mins") or 0)]
+        pick = data.get("pick") == n["n"]
+        extras = [f"Nick {n['n']}"] + ([f"đang chạy {n['busy']} lượt"] if n.get("busy") else []) \
+            + (["→ lượt sau chạy nick này"] if pick else [])
+        cards.append({"provider": "codex", "kho": n["n"], "pick": pick, "title": n.get("workspace") or "Cá nhân",
+                      "email": n.get("email", ""), "plan": n.get("plan", ""),
+                      "groups": [{"name": "", "windows": wins}] if wins else [], "extras": extras,
+                      "source": "kho nick Codex", "updatedAt": n.get("updatedAt"), "status": n.get("why", "")})
+    return cards
+
+
 def collect_others(fresh_sec):
     """Codex và Antigravity: dùng số đã đệm nếu chưa quá fresh_sec giây, không thì hỏi lại."""
     cache = load_cache()
@@ -743,7 +783,8 @@ def main():
     collect_app_sessions(args.fresh_sec)
     collect_lanes(args.fresh_sec)
     collect_others(args.fresh_other)
-    for c in others:
+    codex_kho = collect_codex_kho(args.fresh_other)
+    for c in others + codex_kho:
         c["ageSec"] = None if c["updatedAt"] is None else max(0, int(NOW - c["updatedAt"]))
         vals = [w["pct"] for g in c["groups"] for w in g["windows"]]
         c["maxPct"] = max(vals) if vals else None
@@ -758,7 +799,8 @@ def main():
         out.append(p)
     out.sort(key=lambda p: (not p["inKho"], p["email"], p["orgName"]))
     json.dump({"generatedAt": NOW, "maxPct": float(os.environ.get("KHO_MAX_PCT", "80")),
-               "pools": out, "others": others, "appsIdle": apps_idle, "errors": errors}, sys.stdout, ensure_ascii=False)
+               "pools": out, "others": others, "codexKho": codex_kho, "appsIdle": apps_idle, "errors": errors},
+              sys.stdout, ensure_ascii=False)
 
 
 if __name__ == "__main__":
