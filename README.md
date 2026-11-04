@@ -14,7 +14,8 @@ UI in Vietnamese.*
 - `python3` (chỉ thư viện chuẩn) cho máy chủ; `swiftc` (Xcode Command Line Tools) và Pillow để build app.
 - Tuỳ chọn:
   - `claude` CLI: trả lời và compact phiên đã đóng.
-  - [claude-swap](https://pypi.org/project/claude-swap/): tab Quota hiện kho nick và hỏi số quota sống.
+  - [claude-swap](https://pypi.org/project/claude-swap/): tab Quota hiện kho nick Claude và hỏi số quota sống.
+  - Lệnh `codex` (Codex CLI): tab Quota hiện quota Codex; kho nhiều nick Codex đi kèm repo ở `tools/codex-kho`.
   - App ChatGPT có Codex: hiện phiên Codex.
 
 ## Chạy
@@ -99,14 +100,57 @@ phút một lần; cần cài claude-swap.
 Nút lọc **Tất cả · Claude · Codex · AGY** ở đầu tab (kèm số thẻ) chỉ hiện phần của một nhà cung cấp; lựa
 chọn được nhớ trong trình duyệt của máy đó.
 
-Phần **Codex** có thẻ đăng nhập gốc (`~/.codex`, app Codex và lệnh `codex` gõ tay) và, nếu có lệnh
-`codex-kho` (kho nhiều nick Codex của cc-orchestrator), mỗi nick trong kho một thẻ kèm nick sẽ chạy lượt
+Phần **Codex** có thẻ đăng nhập gốc (`~/.codex`, app Codex và lệnh `codex` gõ tay) và, khi đã nạp kho
+nick Codex (xem mục dưới), mỗi nick trong kho một thẻ kèm nick sẽ chạy lượt
 sau. Phần **AGY** là Antigravity. Mỗi nhóm model một hàng vòng 5 giờ và Tuần. Codex hỏi qua chính lệnh
 `codex` (`codex app-server`, chỉ đọc, Codex tự gọi OpenAI bằng đăng nhập của nó); kho Codex hỏi qua
 `codex-kho quota` theo cùng cách. Không hỏi được thì lấy số Codex ghi lần cuối trong `~/.codex/sessions`
 (bỏ cách này khi có kho, vì kho dùng chung thư mục đó). Antigravity đọc từ máy chủ nội bộ của app đang mở
 (chỉ `127.0.0.1`); app đóng thì chạy `agy -p /usage` (không gọi model, không tốn token, không mở trình
 duyệt). Tối đa 10 phút một lần, "↻ Làm mới" hỏi lại ngay.
+
+## Đăng nhập kho nick
+
+Kho là danh sách tài khoản bạn đăng nhập sẵn một lần. Tab Quota đọc kho để hiện quota từng nick; khi gọi
+bằng lệnh, mỗi lượt tự chọn nick còn nhiều quota nhất. Một nick là một email trong một tổ chức (Claude)
+hoặc một workspace (ChatGPT): cùng email ở hai tổ chức là hai nick, đăng nhập hai lần và mỗi lần chọn một
+tổ chức.
+
+### Kho nick Claude (claude-swap)
+
+1. Cài claude-swap: `uv tool install claude-swap` (hoặc `pipx install claude-swap`).
+2. Mở Terminal, gõ `claude`, trong đó gõ `/login` và đăng nhập nick thứ nhất trên trang web mở ra. Email
+   có nhiều tổ chức thì chọn đúng tổ chức muốn nạp. Gõ `/exit` để thoát.
+3. Gõ `cswap add`: nick vừa đăng nhập được cất vào kho kèm một số thứ tự.
+4. Lặp lại bước 2 và 3 cho từng nick còn lại. Lần `/login` sau thay nick của lệnh `claude`, còn các nick
+   đã cất vẫn nằm nguyên trong kho.
+5. `cswap list` xem kho, `cswap remove <số>` gỡ một nick. Mở tab Quota, chọn bộ lọc Claude.
+
+### Kho nick Codex (`tools/codex-kho`)
+
+Kho Codex đi kèm repo, chỉ cần lệnh `codex` đã cài (vd. `npm i -g @openai/codex`). Mỗi nick giữ riêng
+file đăng nhập; cấu hình, skills và lịch sử phiên dùng chung với `~/.codex`, nên một phiên đổi sang nick
+khác vẫn nối tiếp được. App Codex và lệnh `codex` gõ thẳng vẫn dùng đăng nhập gốc như cũ.
+
+1. Trong thư mục repo, đặt lệnh lên PATH (nên làm, để gõ được ở mọi nơi):
+
+   ```bash
+   mkdir -p ~/.local/bin && ln -s "$PWD/tools/codex-kho" ~/.local/bin/codex-kho
+   ```
+
+2. Gõ `codex-kho nap`. Lệnh in ra một đường link `https://auth.openai.com/...` rồi đứng chờ.
+3. Mở link đó bằng trình duyệt trên CHÍNH máy này (trang đăng nhập trả kết quả về `localhost:1455` của
+   máy), ở cửa sổ đang đăng nhập đúng tài khoản ChatGPT muốn nạp. Trình duyệt đang giữ tài khoản khác thì
+   dùng cửa sổ ẩn danh. Đăng nhập, chọn workspace cho nick này; lệnh báo `Đã nạp nick N`.
+4. Lặp lại bước 2 và 3 cho mỗi nick, xong nick này mới nạp nick sau (mỗi lúc chỉ một lượt đăng nhập).
+5. `codex-kho list` xem kho, dấu → là nick lượt sau sẽ chạy; `codex-kho remove <số>` gỡ một nick.
+6. Gọi Codex qua kho: gõ `codex-kho exec "..."` thay cho `codex exec "..."`; công cụ khác muốn đi qua kho
+   thì trỏ nó tới `codex-kho` thay cho `codex`. Nick chạm hạn mức hoặc mất đăng nhập bị gác lại, lượt sau
+   tự chuyển nick khác. `codex-kho help` xem đủ lệnh.
+
+Workspace doanh nghiệp thường chặn đăng nhập bằng mã thiết bị (báo "contact your workspace admin to
+enable device code authentication"), nên `nap` mặc định đăng nhập web. `codex-kho nap --device` (nhập mã,
+mở được từ máy khác) chỉ dùng cho tài khoản cá nhân hoặc workspace đã bật kiểu này.
 
 ## Cấu hình
 
@@ -135,7 +179,7 @@ Support/Claude-NN`; văn phòng nhận bản theo đúng thư mục đó.
   trang web lạ không gọi được (trình duyệt phải hỏi CORS trước mà máy chủ không trả lời).
 - Chỉ ĐỌC dữ liệu app tự ghi, không sửa file nào của app Claude hay Codex. Chỉ ghi vào
   `~/.claude/van-phong/` (đánh dấu, màn hình đã lưu, đệm tóm tắt, tên tổ chức, log) và
-  `~/.cache/claude-quota/live.json` (chỉ số %).
+  `~/.cache/claude-quota/live.json` (chỉ số %). Kho nick Codex ghi số quota của nó vào `~/.codex-kho/`.
 - Không gửi gì ra ngoài, trừ: bộ tóm tắt bạn tự khai, lượt hỏi quota tới `api.anthropic.com` của tab
   Quota (cần claude-swap), lượt hỏi quota Codex và Antigravity (do chính Codex và Antigravity gửi tới OpenAI,
   Google), và lượt đọc danh sách Dự án tới `api.anthropic.com` (chỉ đọc).

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# codex-kho: lối gọi ngắn cho tools/codex-kho.py (kho nhiều nick Codex, README mục "Đăng nhập kho nick").
+# `codex-kho help` xem đủ lệnh; `codex-kho exec ...` chạy như `codex exec ...` trên nick tự chọn.
+DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")")" && pwd)"
+exec python3 -I "$DIR/codex-kho.py" "$@"

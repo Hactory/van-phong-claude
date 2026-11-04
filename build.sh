@@ -54,7 +54,7 @@ cp "$BUILD/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp "$HERE/server.py" "$APP/Contents/Resources/server.py"
 cp "$HERE/collect.py" "$APP/Contents/Resources/collect.py"   # bộ gom của tab Quota
 mkdir -p "$APP/Contents/Resources/tools"
-cp "$HERE/tools/gui-link-toi-pid.js" "$APP/Contents/Resources/tools/"
+cp "$HERE/tools/gui-link-toi-pid.js" "$HERE/tools/codex-kho" "$HERE/tools/codex-kho.py" "$APP/Contents/Resources/tools/"
 rsync -a --exclude raw "$HERE/web/" "$APP/Contents/Resources/web/"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

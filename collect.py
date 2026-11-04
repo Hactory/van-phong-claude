@@ -722,8 +722,12 @@ def kho_nicks_exist():
 def collect_codex_kho(fresh_sec):
     """Kho nhiều nick Codex (lệnh `codex-kho`): mỗi nick một thẻ. Chỉ đọc số kho đã lưu; có nick cũ
     quá fresh_sec giây thì nhờ `codex-kho quota` hỏi lại (qua codex app-server, không gọi model)."""
+    if not kho_nicks_exist():
+        return []
+    # Bản đi kèm repo (tools/codex-kho) đứng sau cùng: máy đã cài codex-kho riêng thì dùng bản đó.
     kho = find_cli("codex-kho", [os.path.join(HOME, ".local", "bin", "codex-kho"),
-                                 os.path.join(HOME, "cc-orchestrator", "scripts", "codex-kho")])
+                                 os.path.join(HOME, "cc-orchestrator", "scripts", "codex-kho"),
+                                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "codex-kho")])
     if not kho:
         return []
 
