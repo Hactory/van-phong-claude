@@ -134,6 +134,56 @@ for f in CONFIG_JSONS:
 
 
 # ---------- 1. kho claude-swap ----------
+KHO_STATUS = {   # usageStatus của `cswap list --json` -> lời cho người đọc
+    "relogin_required": "mất đăng nhập: khoá của nick này trong kho bị từ chối, cần đăng nhập lại rồi nạp lại vào kho",
+    "no_credentials": "kho không còn đăng nhập của nick này, cần nạp lại",
+    "token_expired": "token hết hạn, claude-swap tự làm mới ở lượt sau",
+    "keychain_unavailable": "tạm không đọc được Keychain",
+    "foreign_credential": "đăng nhập mặc định của máy đang là nick khác",
+    "api_key": "nick dùng API key, không có quota gói",
+    "unavailable": "Anthropic tạm chặn hỏi quota (~30 lần/giờ mỗi tài khoản), tự hồi sau tối đa 1 giờ; nick vẫn dùng được",
+}
+
+
+def kho_struck_fp(number):
+    """Dấu vân tay khoá mà claude-swap đã gác vì bị từ chối (đệm usage.json, không có bí mật)."""
+    path = os.environ.get("CLAUDE_KHO_USAGE") or os.path.join(HOME, ".claude-swap-backup", "cache", "usage.json")
+    rows = (load_json(path) or {}).get("accounts") or {}
+    return (rows.get(str(number)) or {}).get("struckFingerprint") if isinstance(rows, dict) else None
+
+
+def default_login_fp():
+    """Dấu vân tay đăng nhập mặc định của máy (Keychain "Claude Code-credentials"). Token không ra khỏi hàm."""
+    try:
+        from claude_swap import oauth
+    except Exception:
+        return None
+    raw = keychain_secret("Claude Code-credentials")
+    try:
+        return oauth.credential_fingerprint(raw) if raw else None
+    finally:
+        raw = None
+
+
+def kho_status(a):
+    """Lời cảnh báo cho một nick kho; "" là không có gì phải làm.
+
+    Nick đang là đăng nhập mặc định của máy có hai bản khoá: bản máy dùng (tự làm mới) và bản sao
+    claude-swap giữ riêng. Bản sao cũ bị từ chối thì claude-swap vẫn báo relogin_required dù nick
+    sống. Khoá của máy đã khác khoá bị gác thì là báo nhầm: kho không dùng nick đang mặc định."""
+    status = a.get("usageStatus") or ""
+    if status == "ok":
+        return ""
+    if a.get("active") and status == "relogin_required":
+        struck, live = kho_struck_fp(a.get("number")), default_login_fp()
+        if not live:
+            return "bản sao trong kho bị từ chối; chưa đọc được Keychain để kiểm đăng nhập mặc định của máy"
+        if struck and live != struck:
+            return ""
+        return "mất đăng nhập: đăng nhập mặc định của máy bị từ chối, cần mở claude và gõ /login"
+    return KHO_STATUS.get(status, status)
+
+
 def collect_kho():
     cswap = os.environ.get("CLAUDE_KHO_CSWAP") or os.path.join(HOME, ".local", "bin", "cswap")
     if not os.path.exists(cswap):
@@ -160,10 +210,8 @@ def collect_kho():
               [{"name": s.get("name"), "pct": s.get("pct"), "resetsAt": iso_to_epoch(s.get("resetsAt"))}
                for s in (u.get("scoped") or []) if s.get("pct") is not None],
               updated, "kho")
-        status = a.get("usageStatus") or ""
-        if status == "unavailable":
-            status = "Anthropic tạm chặn hỏi quota (~30 lần/giờ mỗi tài khoản), tự hồi sau tối đa 1 giờ; nick vẫn dùng được"
-        add_loc(p, "kho", f"Kho #{a.get('number')}", "" if status == "ok" else status)
+        label = f"Kho #{a.get('number')}" + (" · mặc định máy" if a.get("active") else "")
+        add_loc(p, "kho", label, kho_status(a))
 
 
 # ---------- 2. lane CLI ----------

@@ -577,9 +577,15 @@ def run_exec(argv, env, n):
                 m = SESSION_RE.search(line)
                 if m:
                     sid = m.group(1)
-            if n is not None and not flagged and ERR_FRAME.search(line):
+            if not flagged and ERR_FRAME.search(line):
                 kind = "auth" if AUTH_RE.search(line) else ("limit" if LIMIT_RE.search(line) else None)
-                if kind:
+                if kind == "auth" and n is None:
+                    # Nick chính (~/.codex, lưới đỡ khi kho cạn): không gác được, chỉ ghi lại để
+                    # công cụ ngoài (vd. bộ báo mất đăng nhập) đọc; auth.json đổi là coi như đã sống lại.
+                    flagged = True
+                    with State() as st:
+                        st.data["goc"] = {"why": "mất đăng nhập", "at": time.time(), "auth": auth_of(env["CODEX_HOME"])}
+                elif kind and n is not None:
                     flagged = True
                     with State() as st:  # gác NGAY: bên gọi có thể giết cả nhóm tiến trình khi thấy dòng này
                         if kind == "auth":
@@ -700,8 +706,18 @@ def cmd_nap(argv):
             "plan": (account or {}).get("planType") or claims.get("plan", ""), "addedAt": int(time.time())}
     for n, home, m in nicks():
         if m.get("email") == meta["email"] and m.get("workspaceId") == meta["workspaceId"]:
+            # Nick đã có: đây là đăng nhập lại (thường vì nick mất đăng nhập). CHUYỂN auth.json vừa
+            # đăng nhập vào chỗ bản cũ (không chép: hai nơi giữ chung một khoá là một nơi bị đăng
+            # xuất), giữ nguyên số nick, gỡ dấu gác. Bỏ bản cũ thì lượt nạp này mất tác dụng.
+            os.replace(os.path.join(tmp, "auth.json"), os.path.join(home, "auth.json"))
             safe_rmtree(tmp)
-            say("nick này đã có trong kho (nick %d: %s), bỏ lượt nạp vừa rồi" % (n, label(m)))
+            write_meta(home, dict(m, **{k: v for k, v in meta.items() if v and k != "addedAt"}))
+            with State() as st:
+                st.nick(n).pop("mark", None)
+                if lim:
+                    wins, reached = limits_windows(lim)
+                    set_quota(st, n, wins, reached, "app")
+            print("Đã đăng nhập lại nick %d: %s" % (n, label(m)), flush=True)
             return 0
     n = max([x[0] for x in nicks()] or [0]) + 1  # không dùng lại số đã gỡ, giống claude-swap
     home = os.path.join(NICKS, str(n))
